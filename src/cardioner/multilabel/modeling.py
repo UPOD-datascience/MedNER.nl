@@ -324,7 +324,7 @@ def load_custom_cardioner_model(model_path: str, device: str = "auto"):
 
     # Load model with trust_remote_code=True
     model = AutoModelForTokenClassification.from_pretrained(
-        model_path, trust_remote_code=True
+        model_path, trust_remote_code=True, use_safetensors=True
     )
 
     # Set device

@@ -20,6 +20,7 @@ except Exception:
 LARGE_NEGATIVE_NUMBER = -1e9
 NUM_PER_LAYER = 16
 
+
 def _build_backbone_from_config(config):
     """
     Build a backbone model structure from config only.
@@ -1235,6 +1236,7 @@ class TokenClassificationModel(PreTrainedModel):
 
 def load_custom_cardioner_multiclass_model(model_path: str, device: str = "auto"):
     import os
+
     import torch
     from transformers import AutoModelForTokenClassification, AutoTokenizer
 
@@ -1253,7 +1255,7 @@ def load_custom_cardioner_multiclass_model(model_path: str, device: str = "auto"
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     model = AutoModelForTokenClassification.from_pretrained(
-        model_path, trust_remote_code=True
+        model_path, trust_remote_code=True, use_safetensors=True, use_safetensors=True
     )
 
     if device == "auto":
@@ -1269,8 +1271,9 @@ def load_custom_cardioner_multiclass_model(model_path: str, device: str = "auto"
 
 
 def load_custom_multihead_crf_model(model_path: str, device: str = "auto"):
-    import os
     import json
+    import os
+
     from transformers import AutoTokenizer
 
     required_files = ["config.json", "modeling.py"]

@@ -226,7 +226,10 @@ class ModelTrainer:
                 )
             print("USING CRF:", self.crf)
             base_model = RobertaForTokenClassification.from_pretrained(
-                model, config=or_config, ignore_mismatched_sizes=True
+                model,
+                config=or_config,
+                ignore_mismatched_sizes=True,
+                use_safetensors=True,
             )
             self.model = TokenClassificationModelCRF(
                 or_config,
@@ -251,10 +254,14 @@ class ModelTrainer:
                     config=or_config,
                     add_pooling_layer=False,
                     trust_remote_code=True,
+                    use_safetensors=True,
                 )
             except TypeError:
                 base_model = AutoModel.from_pretrained(
-                    model, config=or_config, trust_remote_code=True
+                    model,
+                    config=or_config,
+                    trust_remote_code=True,
+                    use_safetensors=True,
                 )
             self.model = TokenClassificationModel(or_config, base_model=base_model)
 
@@ -739,6 +746,7 @@ class MultiHeadCRFTrainer:
                 token=hf_token,
                 add_pooling_layer=False,
                 trust_remote_code=True,
+                use_safetensors=True,
             )
         except TypeError:
             base_model = AutoModel.from_pretrained(
@@ -746,6 +754,7 @@ class MultiHeadCRFTrainer:
                 config=base_config,
                 token=hf_token,
                 trust_remote_code=True,
+                use_safetensors=True,
             )
         self.model = TokenClassificationModelMultiHeadCRF(
             config, base_model, freeze_backbone
@@ -1119,6 +1128,7 @@ class MultiHeadTrainer:
                 token=hf_token,
                 add_pooling_layer=False,
                 trust_remote_code=True,
+                use_safetensors=True,
             )
         except TypeError:
             base_model = AutoModel.from_pretrained(

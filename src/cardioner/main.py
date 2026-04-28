@@ -1336,7 +1336,7 @@ def train(
                 list_of_model_locations[0], trust_remote_code=True
             )
             model_averaged = AutoModelForTokenClassification.from_config(
-                config=model_config, trust_remote_code=True
+                config=model_config, trust_remote_code=True, use_safetensors=True
             )
             missing, unexpected = model_averaged.load_state_dict(
                 new_state_dict, strict=False
