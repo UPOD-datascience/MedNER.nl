@@ -819,7 +819,9 @@ def prepare(
         )
 
     tokenizer = AutoTokenizer.from_pretrained(
-        Model, add_prefix_space=True, token=hf_token,
+        Model,
+        add_prefix_space=True,
+        token=hf_token,
         rust_remote_code=False,
         force_download=True,
         local_files_only=False,
