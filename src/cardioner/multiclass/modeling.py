@@ -1255,7 +1255,9 @@ def load_custom_cardioner_multiclass_model(model_path: str, device: str = "auto"
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     model = AutoModelForTokenClassification.from_pretrained(
-        model_path, trust_remote_code=True, use_safetensors=True, use_safetensors=True
+        model_path,
+        trust_remote_code=True,
+        use_safetensors=True,
     )
 
     if device == "auto":
