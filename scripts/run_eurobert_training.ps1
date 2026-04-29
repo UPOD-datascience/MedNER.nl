@@ -1,12 +1,12 @@
 $ErrorActionPreference = "Continue"
 
-$output_path = "T:\laupodteam\AIOS\Bram\language_modeling\Models\language_models\MultiClinAI\RobBERT2023\multilabel_3ldense_20epochs"
-$base_corpus_path = "T:\laupodteam\AIOS\Bram\notebooks\code_dev\CardioNER.nl\assets\MultiClinNER_combined\MultiClinNER-multi"
+$output_path = "T:\laupodteam\AIOS\Bram\language_modeling\Models\language_models\CardioCCC\EuroBERT\multilabel_3ldense_20epochs"
+$base_corpus_path = "T:\laupodteam\AIOS\Bram\notebooks\code_dev\CardioNER.nl\assets\CardioCCC\multi"
 
 $logFile = "training_log.txt"
 
 try {
-	$corpus_path = Join-Path $base_corpus_path "collected_all_strict_medmention.json"
+	$corpus_path = Join-Path $base_corpus_path "collection_multi.json"
 	$output_dir = "${output_path}"
 
 	$msg = "[$(Get-Date)] Starting at $corpus_path"
@@ -15,10 +15,10 @@ try {
 
 	poetry run python -m cardioner.main `
 		--train_model `
-		--model="DTAI-KULeuven/robbert-2023-dutch-large" `
+		--model="EuroBERT/EuroBERT-610m" `
 		--corpus_train=$corpus_path `
 		--parse_annotations `
-		--lang=nl `
+		--lang=multi `
 		--trust_remote_code `
 		--max_token_length=128 `
 		--chunk_size=128 `
@@ -33,8 +33,7 @@ try {
 		--num_splits=20 `
 		--use_class_weights `
 		--classifier_hidden_layers 768 768 768 `
-		--only_first_split `
-		--entity_types PROCEDURE DISEASE SYMPTOM
+		--entity_types PROCEDURE DISEASE SYMPTOM MEDICATION
 
 	if ($LASTEXITCODE -ne 0) {
 		$err = "[$(Get-Date)] ERROR: (exit code $LASTEXITCODE)"

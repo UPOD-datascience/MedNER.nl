@@ -6,11 +6,14 @@ Computes:
 - Number of documents
 - Number of tags per tag label
 - Average and median span length per tag label
+- If "lang" exists on any record, aggregates by language and tag.
+  Records without a valid lang are grouped under "unknown".
 
 Expected JSONL format per line (example):
 {
   "id": "...",
   "text": "...",
+  "lang": "nl",
   "tags": [{"start": 10, "end": 15, "tag": "DISEASE"}, ...]
 }
 """
@@ -22,7 +25,15 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import median
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Union, cast
+
+
+UNKNOWN_LANG = "unknown"
+
+TagStats = Dict[str, float]
+FlatStats = Dict[str, TagStats]
+NestedStats = Dict[str, Dict[str, TagStats]]
+OutputTags = Union[FlatStats, NestedStats]
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,11 +74,25 @@ def inspect_training_jsonl(path: Path) -> Dict[str, object]:
         raise ValueError(f"Not a file: {path}")
 
     document_count = 0
+    has_any_lang = False
+
+    # Used when no lang is present in data
     tag_counts: Counter[str] = Counter()
     span_lengths_by_tag: Dict[str, List[int]] = defaultdict(list)
 
+    # Used when lang is present in data (with unknown bucket for missing/invalid lang)
+    nested_counts: Dict[str, Counter[str]] = defaultdict(Counter)
+    nested_span_lengths: Dict[str, Dict[str, List[int]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+
     for line_number, record in iter_jsonl(path):
         document_count += 1
+
+        raw_lang = record.get("lang")
+        lang_value = raw_lang if isinstance(raw_lang, str) and raw_lang else None
+        if lang_value is not None:
+            has_any_lang = True
 
         tags = record.get("tags", [])
         if tags is None:
@@ -102,44 +127,90 @@ def inspect_training_jsonl(path: Path) -> Dict[str, object]:
                 )
 
             length = end - start
+
+            # Keep flat counts for the no-lang case
             tag_counts[tag_label] += 1
             span_lengths_by_tag[tag_label].append(length)
 
-    span_stats = {}
-    for tag in sorted(tag_counts):
-        lengths = span_lengths_by_tag[tag]
-        avg_length = sum(lengths) / len(lengths) if lengths else 0.0
-        med_length = float(median(lengths)) if lengths else 0.0
-        span_stats[tag] = {
-            "count": tag_counts[tag],
-            "avg_span_length": avg_length,
-            "median_span_length": med_length,
-        }
+            # Always collect nested using unknown fallback; used when any lang is present
+            nested_lang = lang_value if lang_value is not None else UNKNOWN_LANG
+            nested_counts[nested_lang][tag_label] += 1
+            nested_span_lengths[nested_lang][tag_label].append(length)
+
+    if has_any_lang:
+        tags_output: OutputTags = {}
+        for lang in sorted(nested_counts):
+            tags_output[lang] = {}
+            for tag in sorted(nested_counts[lang]):
+                lengths = nested_span_lengths[lang][tag]
+                avg_length = sum(lengths) / len(lengths) if lengths else 0.0
+                med_length = float(median(lengths)) if lengths else 0.0
+                tags_output[lang][tag] = {
+                    "count": nested_counts[lang][tag],
+                    "avg_span_length": avg_length,
+                    "median_span_length": med_length,
+                }
+    else:
+        tags_output = {}
+        for tag in sorted(tag_counts):
+            lengths = span_lengths_by_tag[tag]
+            avg_length = sum(lengths) / len(lengths) if lengths else 0.0
+            med_length = float(median(lengths)) if lengths else 0.0
+            tags_output[tag] = {
+                "count": tag_counts[tag],
+                "avg_span_length": avg_length,
+                "median_span_length": med_length,
+            }
 
     return {
         "documents": document_count,
-        "tags": span_stats,
+        "tags": tags_output,
     }
+
+
+def _is_nested_tags(tags: OutputTags) -> bool:
+    if not tags:
+        return False
+    first_value = next(iter(tags.values()))
+    return isinstance(first_value, dict) and "count" not in first_value
 
 
 def print_text_report(stats: Dict[str, object]) -> None:
     print(f"Documents: {stats['documents']}")
 
-    tags: Dict[str, Dict[str, float]] = stats["tags"]  # type: ignore[assignment]
+    tags = cast(OutputTags, stats["tags"])
     if not tags:
         print("No tags found.")
         return
 
-    print("\nPer-tag statistics:")
-    print(f"{'Tag':<20} {'Count':>10} {'Avg span len':>15} {'Median span len':>17}")
-    print("-" * 65)
-    for tag, values in tags.items():
+    if _is_nested_tags(tags):
+        nested_tags = cast(NestedStats, tags)
+        print("\nPer-language, per-tag statistics:")
         print(
-            f"{tag:<20} "
-            f"{values['count']:>10} "
-            f"{values['avg_span_length']:>15.2f} "
-            f"{values['median_span_length']:>17.2f}"
+            f"{'Lang':<12} {'Tag':<20} {'Count':>10} {'Avg span len':>15} {'Median span len':>17}"
         )
+        print("-" * 82)
+        for lang, tag_map in nested_tags.items():
+            for tag, values in tag_map.items():
+                print(
+                    f"{lang:<12} "
+                    f"{tag:<20} "
+                    f"{values['count']:>10.0f} "
+                    f"{values['avg_span_length']:>15.2f} "
+                    f"{values['median_span_length']:>17.2f}"
+                )
+    else:
+        flat_tags = cast(FlatStats, tags)
+        print("\nPer-tag statistics:")
+        print(f"{'Tag':<20} {'Count':>10} {'Avg span len':>15} {'Median span len':>17}")
+        print("-" * 65)
+        for tag, values in flat_tags.items():
+            print(
+                f"{tag:<20} "
+                f"{values['count']:>10.0f} "
+                f"{values['avg_span_length']:>15.2f} "
+                f"{values['median_span_length']:>17.2f}"
+            )
 
 
 def main() -> None:
