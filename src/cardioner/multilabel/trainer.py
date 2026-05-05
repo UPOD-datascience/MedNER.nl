@@ -2,6 +2,7 @@ import glob
 import os
 import shutil
 from os import environ
+from pathlib import Path
 
 environ["WANDB_MODE"] = "disabled"
 environ["WANDB_DISABLED"] = "true"
@@ -887,9 +888,13 @@ class ModelTrainer:
                     shutil.move(trainer_state_src, trainer_state_dst)
                     print(f"Moved trainer_state.json to {trainer_state_dst}")
 
-                # Remove the checkpoint directory
-                shutil.rmtree(checkpoint_dir)
-                print(f"Removed checkpoint directory: {checkpoint_dir}")
+                # Remove only real checkpoint directories
+                checkpoint_dir_resolved = Path(checkpoint_dir).resolve()
+                if checkpoint_dir_resolved.name.startswith("checkpoint-"):
+                    shutil.rmtree(checkpoint_dir)
+                    print(f"Removed checkpoint directory: {checkpoint_dir}")
+                else:
+                    print(f"Skipped non-checkpoint directory: {checkpoint_dir}")
 
         except Exception as e:
             raise ValueError(f"Failed to save model and metrics: {str(e)}")
