@@ -1274,10 +1274,8 @@ def train(
                 "test_ids": [d["id"] for d in test_data],
                 "test_gids": [d["gid"] for d in test_data],
             }
-            if (
-                (tokenized_data_validation is not None)
-                and (len(tokenized_data_validation) > 0)
-                and (force_splitter == True)
+            if (tokenized_data_validation is not None) and (
+                len(tokenized_data_validation) > 0
             ):
                 split_export["validation_ids"] = [
                     d["id"] for d in tokenized_data_validation
@@ -1289,10 +1287,8 @@ def train(
             with open(split_path, "w", encoding="utf-8") as fw:
                 json.dump(split_export, fw, indent=2)
 
-            if (
-                (tokenized_data_validation is not None)
-                and (len(tokenized_data_validation) > 0)
-                and (force_splitter == True)
+            if (tokenized_data_validation is not None) and (
+                len(tokenized_data_validation) > 0
             ):
                 TrainClass.train(
                     train_data=train_data,
@@ -1303,11 +1299,8 @@ def train(
             else:
                 TrainClass.train(
                     train_data=train_data,
-                    test_data=[],
-                    eval_data=tokenized_data_validation
-                    if (tokenized_data_validation is not None)
-                    and (len(tokenized_data_validation) > 0)
-                    else test_data,
+                    test_data=test_data,
+                    eval_data=test_data,
                     profile=profile,
                 )
         # perform model merger
