@@ -183,8 +183,9 @@ def calculate_metrics_strict(
             - Dict[str, float]: Macro-averaged precision, recall, and F1-score.
     """
 
-    # gs = gs.drop_duplicates(subset=[FILE_NAME, "offset", LABEL_TAG])
-    # pred = pred.drop_duplicates(subset=[FILE_NAME, "offset", LABEL_TAG])
+    # Keep duplicates for accounting, but match mentions in a 1-to-1 way per
+    # (filename, start_span, end_span, label) key to avoid TP overcounting from
+    # many-to-many dataframe merges.
 
     labels = sorted(set(gs[LABEL_TAG].unique()) | set(pred[LABEL_TAG].unique()))
     result_by_cat = {}
@@ -198,18 +199,23 @@ def calculate_metrics_strict(
         gs_label = gs[gs[LABEL_TAG] == label]
         pred_label = pred[pred[LABEL_TAG] == label]
 
-        GS_Pos = gs_label.shape[0]
-        Pred_Pos = pred_label.shape[0]
+        key_cols = [FILE_NAME, START_SPAN_TAG, END_SPAN_TAG, LABEL_TAG]
 
-        merged = pd.merge(
-            pred_label,
-            gs_label,
-            how="inner",
-            on=[FILE_NAME, START_SPAN_TAG, END_SPAN_TAG, LABEL_TAG],
-        )
-        TP = merged.shape[0]
-        FP = Pred_Pos - TP
-        FN = GS_Pos - TP
+        # Count mentions per exact key in prediction and gold.
+        pred_counts = pred_label.groupby(key_cols, dropna=False).size()
+        gs_counts = gs_label.groupby(key_cols, dropna=False).size()
+
+        Pred_Pos = int(pred_counts.sum())
+        GS_Pos = int(gs_counts.sum())
+
+        # Exact-match TP with 1-to-1 matching: for each key, matches are limited
+        # by the smaller multiplicity between pred and gold.
+        counts = pd.concat([pred_counts, gs_counts], axis=1).fillna(0)
+        counts.columns = ["pred_n", "gs_n"]
+        TP = int(counts[["pred_n", "gs_n"]].min(axis=1).sum())
+
+        FP = max(Pred_Pos - TP, 0)
+        FN = max(GS_Pos - TP, 0)
 
         precision = TP / (TP + FP) if (TP + FP) else 0.0
         recall = TP / (TP + FN) if (TP + FN) else 0.0

@@ -111,6 +111,9 @@ def inference(
             print(
                 f"Auto-detected max_word_per_chunk: {max_word_per_chunk} (from tokenizer max_length: {tokenizer.model_max_length})"
             )
+        else:
+            print(f"Max word per chunk is set to \t\t {max_word_per_chunk}")
+            print(f"Max model length is \t\t\t{tokenizer.model_max_length}")
 
         print(f"Loading model from {model_path}...")
         print(f"Processing {len(corpus_data)} samples with NER pipeline...")
@@ -1898,8 +1901,24 @@ if __name__ == "__main__":
             )
             corpus_inference_list = []
             with open(corpus_inference, "r", encoding="utf-8") as fr:
-                for line in fr:
-                    corpus_inference_list.append(json.loads(line))
+                content = fr.read()
+
+            # Check if file is JSON or JSONL
+            content = content.strip()
+            if content.startswith("["):
+                # JSON format: load entire file and extract test_ids/val_ids
+                corpus_data = json.loads(content)
+                if isinstance(corpus_data, dict):
+                    corpus_inference_list = corpus_data.get("test_ids", []).extend(
+                        corpus_data.get("val_ids", [])
+                    )
+                else:
+                    corpus_inference_list = corpus_data
+            else:
+                # JSONL format: parse line by line
+                for line in content.split("\n"):
+                    if line.strip():
+                        corpus_inference_list.append(json.loads(line))
 
         # If split_file is provided, filter to only test_files
         if split_file is not None:
@@ -1909,7 +1928,10 @@ if __name__ == "__main__":
             with open(split_file, "r", encoding="utf-8") as fr:
                 split_data = json.load(fr)
 
-            test_file_ids = [entry.strip(".txt") for entry in split_data["test_gids"]]
+            _test_ids = split_data.get("test_gids", []) or split_data.get(
+                "test_ids", []
+            )
+            test_file_ids = [entry.strip(".txt") for entry in _test_ids]
 
             original_count = len(corpus_inference_list)
             corpus_inference_list = [
@@ -2085,7 +2107,7 @@ if __name__ == "__main__":
             # TODO: check if the split file is correct, seems redundant to have separate entries for class/language.
             corpus_folds = split_data["folds"]
             corpus_validation_ids = [
-                entry.strip(".txt") for entry in split_data["test_files"]
+                entry.strip(".txt") for entry in split_data.get("test_files", [])
             ]  # split_data #[lang]["validation"]["symp"]
 
         corpus_train_id_lists = [
