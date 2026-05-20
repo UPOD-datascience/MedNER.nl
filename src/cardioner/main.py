@@ -319,7 +319,7 @@ def inference(
     """
 
     # Create output tsv path
-    output_tsv_path = os.path.join(output_dir, f"{output_file_prefix}predictions.tsv")
+    output_tsv_path = os.path.join(output_dir, f"{output_file_prefix}_predictions.tsv")
     os.makedirs(output_dir, exist_ok=True)
 
     ref_results = _extract_reference_results(corpus_data)

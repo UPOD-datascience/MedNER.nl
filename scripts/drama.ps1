@@ -1,14 +1,70 @@
-$languages = @("sv", "ro", "it", "es", "en", "cz", "nl")
+$categories = @("PROCEDURE", "DISEASE", "MEDICATION", "SYMPTOM")
+$folds = @(0,1,2,3,4,5,6,7,8,9)
 
-foreach ($lang in $languages) {
+$lang="sv"
+$stride= 256
 
-poetry run python -m cardioner.main --inference_only `
-                                    --output_file_prefix=${lang}_test `
-                                    --model_path=T:\laupodteam\AIOS\Bram\language_modeling\Models\language_models\CardioCCC\EuroBERT\multilabel_3ldense_20epochs_40splits\fold_0 `
+$model="SV-BERT-base"
+$base_folder="/media/bramiozo/Storage2/DATA/NER/DT4H_results/paper/SV/${model}/multiclass"
+foreach ($category in $categories) {
+    foreach ($fold in $folds){
+        poetry run python -m cardioner.main --inference_only `
+                                    --output_file_prefix=${lang}_${category}_${stride}_${fold}_eval `
+                                    --model_path=${base_folder} / multiclass_maxTL256_batch16_chunk256_epochs10_paper_paragraph_${category}/fold_${fold}`
                                     --inference_pipe=dt4h `
-                                    --corpus_inference=T:\laupodteam\AIOS\Bram\notebooks\code_dev\CardioNER.nl\assets\CardioCCC_EVAL\data_selection\${lang} `
+                                    --corpus_inference=/media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/CardioCCC/Eval/${lang} `
                                     --inference_batch_size=8 `
-                                    --lang=multi `
+                                    --lang=$lang `
                                     --trust_remote_code `
-                                    --inference_stride=128
+                                    --inference_stride=$stride
+    }
+}
+
+$model="CardioBERTa.sv"
+$base_folder="/media/bramiozo/Storage2/DATA/NER/DT4H_results/paper/SV/${model}/multiclass"
+foreach ($category in $categories) {
+    foreach ($fold in $folds){
+        poetry run python -m cardioner.main --inference_only `
+                                    --output_file_prefix=${lang}_${category}_eval `
+                                    --model_path=${base_folder} / multiclass_maxTL256_batch16_chunk256_epochs10_paper_paragraph_${category}`
+                                    --inference_pipe=dt4h `
+                                    --corpus_inference=/media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/CardioCCC/Eval/${lang}/fold_${fold} `
+                                    --inference_batch_size=8 `
+                                    --lang=$lang `
+                                    --trust_remote_code `
+                                    --inference_stride=$stride
+    }
+}
+$lang="nl"
+$stride= 256
+
+$model="RobBERT2023_base"
+$base_folder="/media/bramiozo/Storage2/DATA/NER/DT4H_results/paper/SV/${model}/multiclass"
+foreach ($category in $categories) {
+    foreach ($fold in $folds){
+        poetry run python -m cardioner.main --inference_only `
+                                    --output_file_prefix=${lang}_${category}_eval `
+                                    --model_path=${base_folder} / multiclass_maxTL256_batch16_chunk256_epochs10_paper_paragraph_${category}`
+                                    --inference_pipe=dt4h `
+                                    --corpus_inference=/media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/CardioCCC/Eval/${lang}/fold_${fold} `
+                                    --inference_batch_size=8 `
+                                    --lang=$lang `
+                                    --trust_remote_code `
+                                    --inference_stride=$stride
+    }
+}
+$model="CardioBERTa.nl"
+$base_folder="/media/bramiozo/Storage2/DATA/NER/DT4H_results/paper/SV/${model}/multiclass"
+foreach ($category in $categories) {
+    foreach ($fold in $folds){
+        poetry run python -m cardioner.main --inference_only `
+                                    --output_file_prefix=${lang}_${category}_eval `
+                                    --model_path=${base_folder} / multiclass_maxTL256_batch16_chunk256_epochs10_paper_paragraph_${category}`
+                                    --inference_pipe=dt4h `
+                                    --corpus_inference=/media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/CardioCCC/Eval/${lang}/fold_${fold} `
+                                    --inference_batch_size=8 `
+                                    --lang=$lang `
+                                    --trust_remote_code `
+                                    --inference_stride=$stride
+}
 }
