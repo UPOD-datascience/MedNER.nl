@@ -28,9 +28,6 @@ from cardioner import main
 
 
 def make_corpora(bulk_file, splits_file):
-    print(f"Using the relative split file {splits_file}.")
-    print(50 * "=")
-
     corpus_list = []
     with open(bulk_file, "r", encoding="utf-8") as fr:
         for line in fr:
@@ -65,8 +62,8 @@ def make_corpora(bulk_file, splits_file):
     for k, fold in enumerate(corpus_folds):
         print(f"Fold {k}:")
         print(f"  Train: {len(fold['train_files'])}")
-        print(f"  Test: {len(fold['val_files'])}")
-    print(f"  Validation: {len(corpus_validation_list)}")
+        print(f"  Validation: {len(fold['val_files'])}")
+    print(f"  Test: {len(corpus_validation_list)}")
     print(100 * "=")
     print(100 * "=")
 
@@ -360,16 +357,9 @@ def run_main():
     parser.add_argument(
         "--split_file",
         type=str,
-        required=False,
+        required=True,
         help="Path to the JSON file containing fold splits and test files.",
     )
-    parser.add_argument(
-        "--rel_split_file",
-        type=str,
-        required=False,
-        help="Path to the JSON file containing the train/test split, relative to the fold-folder: e.g. /fold_0/split.json = --rel_split_file=split.json.",
-    )
-
     parser.add_argument(
         "--model_folder",
         type=str,
@@ -399,8 +389,14 @@ def run_main():
     parser.add_argument(
         "--trust_remote_code",
         action="store_true",
-        default=False,
+        default=True,
         help="Whether to trust remote code when loading models.",
+    )
+    parser.add_argument(
+        "--no_trust_remote_code",
+        action="store_false",
+        dest="trust_remote_code",
+        help="Disable trusting remote code when loading models.",
     )
     parser.add_argument(
         "--strategy",
@@ -428,34 +424,19 @@ def run_main():
         default=False,
         help="Skip inference on the held-out validation/test set.",
     )
+
     args = parser.parse_args()
 
-    if (args.split_file is None) == (args.rel_split_file is None):
-        raise ValueError("Provide exactly one of --split_file or --rel_split_file.")
+    # Prepare corpora and splits
+    corpus, corpus_validation, splits = make_corpora(args.bulk_file, args.split_file)
 
-    if not os.path.isdir(args.model_folder):
-        raise FileNotFoundError(f"Model folder not found: {args.model_folder}")
-
-    if not os.path.isfile(args.bulk_file):
-        raise FileNotFoundError(f"Bulk file not found: {args.bulk_file}")
+    if args.skip_validation:
+        corpus_validation = None
 
     # Get model folders and sort them
     model_folders = get_model_folders(args.model_folder, args.folder_prefix)
     model_folders = sorted(model_folders)  # Ensure consistent ordering
     model_list = [os.path.join(args.model_folder, f) for f in model_folders]
-
-    # Prepare corpora and splits
-    if args.rel_split_file is None:
-        corpus, corpus_validation, splits = make_corpora(
-            args.bulk_file, args.split_file
-        )
-    else:
-        corpus, corpus_validation, splits = make_corpora_from_rel_split(
-            args.bulk_file, args.rel_split_file, model_list
-        )
-
-    if args.skip_validation:
-        corpus_validation = None
 
     if len(model_list) != len(splits):
         raise ValueError(
