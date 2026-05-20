@@ -597,7 +597,7 @@ class ModelTrainer:
             self.custom_model = True
         else:
             self.model = MultiLabelTokenClassificationModelHF.from_pretrained(
-                model, config=or_config
+                model, config=or_config, use_safetensors=True
             )
             self.custom_model = False
             self.or_config = or_config

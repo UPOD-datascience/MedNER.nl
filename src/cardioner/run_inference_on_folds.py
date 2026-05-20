@@ -223,6 +223,30 @@ def print_aggregated_summary(aggregated: dict):
     print("\n" + "=" * 80)
 
 
+def get_type(model_path):
+    config_path = os.path.join(model_path, "config.json")
+    is_multihead_crf = False
+    is_multihead = False
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            config = json.load(f)
+            # Check for multihead CRF indicators in config
+            is_multihead_crf = "TokenClassificationModelMultiHeadCRF" in config.get(
+                "architectures", []
+            )
+            # Check for multihead (no CRF) indicators in config
+            is_multihead = "TokenClassificationModelMultiHead" in config.get(
+                "architectures", []
+            )
+
+    if (is_multihead_crf == False) and (is_multihead == False):
+        return "standard"
+    elif is_multihead_crf:
+        return "multihead_crf"
+    else:
+        return "multihead"
+
+
 def process_splits(
     corpus: List[dict],
     corpus_validation: List[dict] | None,
@@ -239,29 +263,14 @@ def process_splits(
     resultfile_list = []
     for k, (_, test_indcs) in enumerate(splits):
         print(f"Running inference for fold {k}")
+
+        model_type = get_type(model_list[k])
         _corpus = [d for d in corpus if d["id"] in test_indcs]
         output_file_prefix = f"fold_on_fold{k}_"
-        main.inference(
-            _corpus,
-            model_list[k],
-            output_dir=output_dir,
-            output_file_prefix=output_file_prefix,
-            lang=lang,
-            max_word_per_chunk=max_word_per_chunk,
-            trust_remote_code=trust_remote_code,
-            strategy=strategy,
-            pipe=pipe,
-        )
-        resultfile_list.append(f"{output_dir}/{output_file_prefix}sequence_result.json")
 
-    resultfile_val_list = []
-    if corpus_validation is not None:
-        # This runs and scores inference for each fold model on the same validation set
-        for k, (_, test_indcs) in enumerate(splits):
-            print(f"Running inference for fold {k}")
-            output_file_prefix = f"fold{k}_on_val_"
+        if model_type == "standard":
             main.inference(
-                corpus_validation,
+                _corpus,
                 model_list[k],
                 output_dir=output_dir,
                 output_file_prefix=output_file_prefix,
@@ -271,6 +280,71 @@ def process_splits(
                 strategy=strategy,
                 pipe=pipe,
             )
+        elif model_type == "multihead_crf":
+            main.inference_multihead_crf(
+                corpus_data=_corpus,
+                model_path=model_list[k],
+                output_dir=output_dir,
+                output_file_prefix=output_file_prefix,
+                lang=lang,
+                max_word_per_chunk=max_word_per_chunk,  # Auto-detect from tokenizer
+                trust_remote_code=True,  # Always true for multihead CRF
+            )
+        else:
+            main.inference_multihead(
+                corpus_data=_corpus,
+                model_path=model_list[k],
+                output_dir=output_dir,
+                output_file_prefix=output_file_prefix,
+                lang=lang,
+                max_word_per_chunk=max_word_per_chunk,  # Auto-detect from tokenizer
+                trust_remote_code=True,  # Always true for multihead
+            )
+
+        resultfile_list.append(f"{output_dir}/{output_file_prefix}sequence_result.json")
+
+    resultfile_val_list = []
+    if corpus_validation is not None:
+        # This runs and scores inference for each fold model on the same validation set
+        for k, (_, test_indcs) in enumerate(splits):
+            print(f"Running inference for fold {k} on validation")
+            output_file_prefix = f"fold{k}_on_val_"
+
+            model_type = get_type(model_list[k])
+
+            if model_type == "standard":
+                main.inference(
+                    corpus_validation,
+                    model_list[k],
+                    output_dir=output_dir,
+                    output_file_prefix=output_file_prefix,
+                    lang=lang,
+                    max_word_per_chunk=max_word_per_chunk,
+                    trust_remote_code=trust_remote_code,
+                    strategy=strategy,
+                    pipe=pipe,
+                )
+            elif model_type == "multihead_crf":
+                main.inference_multihead_crf(
+                    corpus_data=corpus_validation,
+                    model_path=model_list[k],
+                    output_dir=output_dir,
+                    output_file_prefix=output_file_prefix,
+                    lang=lang,
+                    max_word_per_chunk=max_word_per_chunk,  # Auto-detect from tokenizer
+                    trust_remote_code=True,  # Always true for multihead CRF
+                )
+            else:
+                main.inference_multihead(
+                    corpus_data=corpus_validation,
+                    model_path=model_list[k],
+                    output_dir=output_dir,
+                    output_file_prefix=output_file_prefix,
+                    lang=lang,
+                    max_word_per_chunk=max_word_per_chunk,  # Auto-detect from tokenizer
+                    trust_remote_code=True,  # Always true for multihead
+                )
+
             resultfile_val_list.append(
                 f"{output_dir}/{output_file_prefix}sequence_result.json"
             )

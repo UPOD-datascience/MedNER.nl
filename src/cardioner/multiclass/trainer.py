@@ -820,6 +820,7 @@ class MultiHeadCRFTrainer:
         predictions_dict, labels_dict = eval_preds
 
         all_metrics = {}
+        per_entity_f1 = []
 
         for entity_type in self.entity_types:
             if entity_type not in predictions_dict or entity_type not in labels_dict:
@@ -858,6 +859,13 @@ class MultiHeadCRFTrainer:
                 # Prefix metrics with entity type
                 for key, value in entity_metrics.items():
                     all_metrics[f"{entity_type}_{key}"] = value
+
+                # Track entity-level F1 for model selection
+                per_entity_f1.append(entity_metrics.get("overall_f1", 0.0))
+
+        # Required by TrainingArguments(metric_for_best_model="macro_f1")
+        if per_entity_f1:
+            all_metrics["macro_f1"] = sum(per_entity_f1) / len(per_entity_f1)
 
         return all_metrics
 
@@ -1179,6 +1187,7 @@ class MultiHeadTrainer:
                 config=base_config,
                 token=hf_token,
                 trust_remote_code=True,
+                use_safetensors=True,
             )
         self.model = TokenClassificationModelMultiHead(
             config, base_model, freeze_backbone
