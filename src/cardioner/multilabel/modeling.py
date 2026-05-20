@@ -1,4 +1,7 @@
+import importlib
 import inspect
+import json
+import os
 from typing import Optional, Tuple, Union
 
 import torch
@@ -8,6 +11,7 @@ from transformers import (
     AutoModel,
     DebertaV2Config,
     PreTrainedModel,
+    PretrainedConfig,
     RobertaConfig,
 )
 
@@ -15,7 +19,77 @@ try:
     from transformers import EuroBertModel
 except ImportError:
     EuroBertModel = None
+
 from transformers.modeling_outputs import TokenClassifierOutput
+
+
+def _resolve_model_config_class():
+    """
+    Resolve the config class for this custom model at import time.
+
+    transformers AutoModel registration requires model_class.config_class to be
+    a non-None class before from_pretrained() instantiates the model.
+
+    Priority:
+      1) Read sibling config.json auto_map["AutoConfig"] from checkpoint folder
+      2) Import known local custom config classes if present
+      3) Fallback to common HF config classes
+    """
+    # 1) Prefer checkpoint-local auto_map (agnostic across backbones/custom configs)
+    try:
+        cfg_path = os.path.join(os.path.dirname(__file__), "config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg_json = json.load(f)
+            auto_cfg = (cfg_json.get("auto_map") or {}).get("AutoConfig")
+            if isinstance(auto_cfg, str) and "." in auto_cfg:
+                module_name, class_name = auto_cfg.rsplit(".", 1)
+
+                # Try module relative to current package first (checkpoint runtime)
+                pkg = __name__.rsplit(".", 1)[0] if "." in __name__ else None
+                if pkg:
+                    try:
+                        mod = importlib.import_module(f".{module_name}", package=pkg)
+                        cls = getattr(mod, class_name, None)
+                        if isinstance(cls, type):
+                            return cls
+                    except Exception:
+                        pass
+
+                # Then absolute import
+                try:
+                    mod = importlib.import_module(module_name)
+                    cls = getattr(mod, class_name, None)
+                    if isinstance(cls, type):
+                        return cls
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 2) Known local custom config modules
+    for candidate in (
+        ".configuration_eurobert.EuroBertConfig",
+        "configuration_eurobert.EuroBertConfig",
+    ):
+        try:
+            module_name, class_name = candidate.rsplit(".", 1)
+            if module_name.startswith("."):
+                pkg = __name__.rsplit(".", 1)[0] if "." in __name__ else None
+                if pkg:
+                    mod = importlib.import_module(module_name, package=pkg)
+                else:
+                    continue
+            else:
+                mod = importlib.import_module(module_name)
+            cls = getattr(mod, class_name, None)
+            if isinstance(cls, type):
+                return cls
+        except Exception:
+            continue
+
+    # 3) Safe fallback
+    return RobertaConfig if isinstance(RobertaConfig, type) else PretrainedConfig
 
 
 class MultiLabelTokenClassificationModelCustom(PreTrainedModel):
@@ -24,9 +98,11 @@ class MultiLabelTokenClassificationModelCustom(PreTrainedModel):
     This model can be loaded with trust_remote_code=True for HuggingFace Hub compatibility.
     """
 
-    # Supports BERT, RoBERTa, and DeBERTa(V2) models
+    # Must be non-None at class-definition/import time for AutoModel registration.
+    # Resolved dynamically to stay backbone/config agnostic.
+    config_class = _resolve_model_config_class()
 
-    # config_class = RobertaConfig
+    # Supports BERT, RoBERTa, and DeBERTa(V2) models
 
     def __init__(
         self,
@@ -37,7 +113,6 @@ class MultiLabelTokenClassificationModelCustom(PreTrainedModel):
         classifier_dropout=0.1,
     ):
         super().__init__(config)
-        self.__class__.config_class = config.__class__
         self.config = config
         self.num_labels = config.num_labels
 

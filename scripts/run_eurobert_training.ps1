@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Continue"
 
-$output_path = "T:\laupodteam\AIOS\Bram\language_modeling\Models\language_models\CardioCCC\EuroBERT\multilabel_3ldense_20epochs"
+$output_path = "T:\laupodteam\AIOS\Bram\language_modeling\Models\language_models\CardioCCC\EuroBERT\multilabel_3ldense_20epochs_40splits"
 $base_corpus_path = "T:\laupodteam\AIOS\Bram\notebooks\code_dev\CardioNER.nl\assets\CardioCCC\multi"
 
 $logFile = "training_log.txt"
@@ -25,12 +25,13 @@ try {
 		--batch_size=8 `
 		--chunk_type=centered `
 		--output_dir=$output_dir `
-		--num_epochs=20 `
+		--num_epochs=10 `
 		--learning_rate=2e-5 `
 		--weight_decay=1e-4 `
 		--accumulation_steps=2 `
 		--force_splitter `
-		--num_splits=20 `
+		--num_splits=40 `
+		--only_first_split `
 		--use_class_weights `
 		--classifier_hidden_layers 768 768 768 `
 		--entity_types PROCEDURE DISEASE SYMPTOM MEDICATION
