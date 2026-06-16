@@ -53,6 +53,240 @@ cuda.empty_cache()
 print(f"CUDA available: {cuda.is_available()}")
 
 
+def _extract_reference_results(corpus_data: List[Dict]) -> List[Dict]:
+    """Extract reference entities from corpus data when `tags` are available."""
+    ref_results = []
+    for doc in corpus_data:
+        doc_id = doc.get("id", "unknown")
+        text = doc.get("text", "")
+        ref_tags = doc.get("tags", None)
+
+        if not isinstance(ref_tags, list):
+            continue
+
+        for _tag in ref_tags:
+            start = _tag.get("start")
+            end = _tag.get("end")
+            label = _tag.get("tag")
+            if start is None or end is None or label is None:
+                continue
+
+            ref_results.append(
+                {
+                    "filename": doc_id,
+                    "label": label,
+                    "start_span": start,
+                    "end_span": end,
+                    "text": text[start:end],
+                }
+            )
+
+    return ref_results
+
+
+def _split_text_with_indices(
+    text: str, text_splitter: RecursiveCharacterTextSplitter
+) -> List[Tuple[str, int, int]]:
+    """Split text into chunks and map each chunk back to absolute character offsets."""
+    raw_chunks = text_splitter.split_text(text)
+    used_indices = set()
+    chunks: List[Tuple[str, int, int]] = []
+
+    for chunk_text in raw_chunks:
+        start_index = text.find(chunk_text)
+        while start_index in used_indices:
+            start_index = text.find(chunk_text, start_index + 1)
+
+        if start_index < 0:
+            continue
+
+        used_indices.add(start_index)
+        end_index = start_index + len(chunk_text)
+        chunks.append((chunk_text, start_index, end_index))
+
+    if not chunks:
+        chunks = [(text, 0, len(text))]
+
+    return chunks
+
+
+def _get_word_spans(text: str) -> Tuple[List[str], List[Tuple[int, int]]]:
+    """Create word-level tokens and their exact char spans, aligned to original text."""
+    matches = predictor.split_sentence_with_indices(text)
+    words: List[str] = []
+    spans: List[Tuple[int, int]] = []
+
+    for m in matches:
+        token_text = m.group().strip()
+        if not token_text:
+            continue
+        words.append(token_text)
+        spans.append((m.start(), m.end()))
+
+    return words, spans
+
+
+def _aggregate_word_level_bio_predictions(
+    tagged_tokens: List[Dict],
+    chunk_text: str,
+    chunk_offset: int,
+    doc_id: str,
+    default_entity_type: Optional[str] = None,
+) -> List[Dict]:
+    """Aggregate BIO-tagged word-level predictions into span-level entities."""
+    entities: List[Dict] = []
+    current_entity: Optional[str] = None
+    current_start: Optional[int] = None
+    current_end: Optional[int] = None
+
+    for token in tagged_tokens:
+        tag = token["tag"]
+        start = int(token["start"])
+        end = int(token["end"])
+
+        is_b = tag.startswith("B-") or tag == "B"
+        is_i = tag.startswith("I-") or tag == "I"
+
+        if is_b:
+            if (
+                current_entity is not None
+                and current_start is not None
+                and current_end is not None
+            ):
+                entities.append(
+                    {
+                        "filename": doc_id,
+                        "label": current_entity,
+                        "start_span": chunk_offset + current_start,
+                        "end_span": chunk_offset + current_end,
+                        "text": chunk_text[current_start:current_end],
+                    }
+                )
+
+            current_entity = (
+                tag[2:] if tag.startswith("B-") else (default_entity_type or "")
+            )
+            current_start = start
+            current_end = end
+
+        elif is_i:
+            tag_type = tag[2:] if tag.startswith("I-") else (default_entity_type or "")
+            if current_entity == tag_type and current_start is not None:
+                current_end = end
+            else:
+                if (
+                    current_entity is not None
+                    and current_start is not None
+                    and current_end is not None
+                ):
+                    entities.append(
+                        {
+                            "filename": doc_id,
+                            "label": current_entity,
+                            "start_span": chunk_offset + current_start,
+                            "end_span": chunk_offset + current_end,
+                            "text": chunk_text[current_start:current_end],
+                        }
+                    )
+
+                current_entity = tag_type
+                current_start = start
+                current_end = end
+
+        else:  # O
+            if (
+                current_entity is not None
+                and current_start is not None
+                and current_end is not None
+            ):
+                entities.append(
+                    {
+                        "filename": doc_id,
+                        "label": current_entity,
+                        "start_span": chunk_offset + current_start,
+                        "end_span": chunk_offset + current_end,
+                        "text": chunk_text[current_start:current_end],
+                    }
+                )
+            current_entity = None
+            current_start = None
+            current_end = None
+
+    if (
+        current_entity is not None
+        and current_start is not None
+        and current_end is not None
+    ):
+        entities.append(
+            {
+                "filename": doc_id,
+                "label": current_entity,
+                "start_span": chunk_offset + current_start,
+                "end_span": chunk_offset + current_end,
+                "text": chunk_text[current_start:current_end],
+            }
+        )
+
+    return entities
+
+
+def _write_reference_and_sequence_scores(
+    ref_results: List[Dict],
+    pred_df: Optional[pd.DataFrame],
+    output_dir: str,
+    output_file_prefix: str = "",
+) -> None:
+    """Write reference TSV and sequence-level strict/relaxed metrics when possible."""
+    ref_tsv_path = os.path.join(output_dir, f"{output_file_prefix}reference.tsv")
+    sequence_result_path = os.path.join(
+        output_dir, f"{output_file_prefix}sequence_result.json"
+    )
+
+    if not isinstance(ref_results, list) or len(ref_results) == 0:
+        print("No reference entities found in the corpus")
+        return
+
+    df_ref = pd.DataFrame(ref_results)
+    df_ref.to_csv(ref_tsv_path, sep="\t", index=False)
+
+    if pred_df is not None and not pred_df.empty and "label" in pred_df.columns:
+        # Keep original behavior: evaluate only labels present in predictions.
+        df_ref_for_scoring = df_ref.loc[df_ref.label.isin(pred_df.label.unique())]
+    else:
+        df_ref_for_scoring = df_ref.iloc[0:0].copy()
+
+    print(f"Reference results saved to {ref_tsv_path}")
+    print(f"Total entities in reference data: {len(df_ref_for_scoring)}")
+
+    if pred_df is None or pred_df.empty:
+        print("No predictions available; skipping sequence scoring")
+        return
+
+    print(f"Performing sequence scoring and writing to {sequence_result_path}")
+    res_by_cat_strict, micro_summ_strict, macro_summ_strict = (
+        evaluation.calculate_metrics_strict(df_ref_for_scoring, pred_df)
+    )
+    res_by_cat_relaxed, micro_summ_relaxed, macro_summ_relaxed = (
+        evaluation.calculate_metrics_relaxed(df_ref_for_scoring, pred_df)
+    )
+
+    final_dict = {
+        "strict": {
+            "per_category": res_by_cat_strict,
+            "micro": micro_summ_strict,
+            "macro": macro_summ_strict,
+        },
+        "relaxed": {
+            "per_category": res_by_cat_relaxed,
+            "micro": micro_summ_relaxed,
+            "macro": macro_summ_relaxed,
+        },
+    }
+
+    with open(sequence_result_path, "w", encoding="utf-8") as fw:
+        json.dump(final_dict, fw)
+
+
 def inference(
     corpus_data: List[Dict],
     model_path: str,
@@ -85,9 +319,10 @@ def inference(
     """
 
     # Create output tsv path
-    output_tsv_path = os.path.join(output_dir, f"{output_file_prefix}predictions.tsv")
-    ref_tsv_path = os.path.join(output_dir, f"{output_file_prefix}reference.tsv")
+    output_tsv_path = os.path.join(output_dir, f"{output_file_prefix}_predictions.tsv")
     os.makedirs(output_dir, exist_ok=True)
+
+    ref_results = _extract_reference_results(corpus_data)
 
     if pipe == "hf":
         try:
@@ -111,6 +346,9 @@ def inference(
             print(
                 f"Auto-detected max_word_per_chunk: {max_word_per_chunk} (from tokenizer max_length: {tokenizer.model_max_length})"
             )
+        else:
+            print(f"Max word per chunk is set to \t\t {max_word_per_chunk}")
+            print(f"Max model length is \t\t\t{tokenizer.model_max_length}")
 
         print(f"Loading model from {model_path}...")
         print(f"Processing {len(corpus_data)} samples with NER pipeline...")
@@ -127,25 +365,9 @@ def inference(
         )
 
         pred_results = []
-        ref_results = []
         for doc in tqdm(corpus_data, desc="Running inference"):
             doc_id = doc.get("id", "unknown")
             text = doc.get("text", "")
-
-            # if doc.get("tags", None) is not None add ref_results
-            ref_tags = doc.get("tags", None)
-            if isinstance(ref_tags, list):
-                for _tag in ref_tags:
-                    entity_text = text[_tag["start"] : _tag["end"]]
-                    ref_results.append(
-                        {
-                            "filename": doc_id,
-                            "label": _tag["tag"],
-                            "start_span": _tag["start"],
-                            "end_span": _tag["end"],
-                            "text": entity_text,
-                        }
-                    )
 
             if not text:
                 continue
@@ -180,26 +402,10 @@ def inference(
             lang=lang,
         )
         pred_results = []
-        ref_results = []
         for doc in tqdm(corpus_data, desc="Running inference"):
             doc_id = doc.get("id", "unknown")
             text = doc.get("text", "")
             # text = text.replace("\n", " ").replace("\t", " ")
-
-            # if doc.get("tags", None) is not None add ref_results
-            ref_tags = doc.get("tags", None)
-            if isinstance(ref_tags, list):
-                for _tag in ref_tags:
-                    entity_text = text[_tag["start"] : _tag["end"]]
-                    ref_results.append(
-                        {
-                            "filename": doc_id,
-                            "label": _tag["tag"],
-                            "start_span": _tag["start"],
-                            "end_span": _tag["end"],
-                            "text": entity_text,
-                        }
-                    )
 
             if not text:
                 continue
@@ -224,53 +430,21 @@ def inference(
                     )
 
     # Create DataFrame and save to TSV
+    pred_df: Optional[pd.DataFrame] = None
     if isinstance(pred_results, list) and len(pred_results) > 0:
-        df = pd.DataFrame(pred_results)
-        df.to_csv(output_tsv_path, sep="\t", index=False)
+        pred_df = pd.DataFrame(pred_results)
+        pred_df.to_csv(output_tsv_path, sep="\t", index=False)
         print(f"Predictions saved to {output_tsv_path}")
         print(f"Total entities predicted: {len(pred_results)}")
     else:
         print("No entities found in the corpus")
 
-    if isinstance(ref_results, list) and len(ref_results) > 0:
-        df_ref = pd.DataFrame(ref_results)
-        df_ref.to_csv(ref_tsv_path, sep="\t", index=False)
-
-        # remove entity classes that are not present in the prediction df
-        df_ref = df_ref.loc[df_ref.label.isin(df.label.unique())]
-
-        print(f"Reference results saved to {ref_tsv_path}")
-        print(f"Total entities in reference data: {len(df_ref)}")
-    else:
-        print("No entities found in the corpus")
-
-    # scoring, if possible
-    if len(ref_results) > 0:
-        print(
-            f"Performing sequence scoring and writing to {output_dir}/{output_file_prefix}sequence_result.json"
-        )
-        res_by_cat_strict, micro_summ_strict, macro_summ_strict = (
-            evaluation.calculate_metrics_strict(df_ref, df)
-        )
-        res_by_cat_relaxed, micro_summ_relaxed, macro_summ_relaxed = (
-            evaluation.calculate_metrics_relaxed(df_ref, df)
-        )
-        final_dict = {
-            "strict": {
-                "per_category": res_by_cat_strict,
-                "micro": micro_summ_strict,
-                "macro": macro_summ_strict,
-            },
-            "relaxed": {
-                "per_category": res_by_cat_relaxed,
-                "micro": micro_summ_relaxed,
-                "macro": macro_summ_relaxed,
-            },
-        }
-        json.dump(
-            final_dict,
-            open(f"{output_dir}/{output_file_prefix}sequence_result.json", "w"),
-        )
+    _write_reference_and_sequence_scores(
+        ref_results=ref_results,
+        pred_df=pred_df,
+        output_dir=output_dir,
+        output_file_prefix=output_file_prefix,
+    )
 
     return pred_results
 
@@ -279,6 +453,7 @@ def inference_multihead_crf(
     corpus_data: List[Dict],
     model_path: str,
     output_dir: str,
+    output_file_prefix: str = "",
     lang: str = "nl",
     max_word_per_chunk: int | None = None,
     trust_remote_code: bool = True,
@@ -301,11 +476,14 @@ def inference_multihead_crf(
     """
     import pandas as pd
     import torch
-    from multiclass.modeling import TokenClassificationModelMultiHeadCRF
+
+    from cardioner.multiclass.modeling import TokenClassificationModelMultiHeadCRF
 
     # Create output tsv path
-    output_tsv_path = os.path.join(output_dir, "predictions.tsv")
+    output_tsv_path = os.path.join(output_dir, f"{output_file_prefix}predictions.tsv")
     os.makedirs(output_dir, exist_ok=True)
+
+    ref_results = _extract_reference_results(corpus_data)
 
     # Load tokenizer (prefer fast tokenizer, fallback to slow)
     try:
@@ -356,142 +534,86 @@ def inference_multihead_crf(
         if not text:
             continue
 
-        # Tokenize with offset mapping
-        # Process in chunks if text is too long
-        words = text.split()
-        chunks = []
-        current_chunk_words = []
-        current_start = 0
+        chunker = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+            encoding_name="o200k_base",
+            separators=["\n\n\n", "\n\n", "\n", " .", " !", " ?", " ،", " ,", " ", ""],
+            keep_separator=True,
+            chunk_size=max_word_per_chunk,
+            chunk_overlap=0,
+        )
+        chunks = _split_text_with_indices(text, chunker)
 
-        for i, word in enumerate(words):
-            current_chunk_words.append(word)
-            if len(current_chunk_words) >= max_word_per_chunk:
-                chunk_text = " ".join(current_chunk_words)
-                chunk_start = text.find(chunk_text, current_start)
-                chunks.append((chunk_text, chunk_start))
-                current_start = chunk_start + len(chunk_text)
-                current_chunk_words = []
+        for chunk_text, chunk_offset, _chunk_end in chunks:
+            if not chunk_text.strip():
+                continue
 
-        if current_chunk_words:
-            chunk_text = " ".join(current_chunk_words)
-            chunk_start = text.find(chunk_text, current_start)
-            chunks.append((chunk_text, chunk_start))
+            word_tokens, word_spans = _get_word_spans(chunk_text)
+            if len(word_tokens) == 0:
+                continue
 
-        if not chunks:
-            chunks = [(text, 0)]
-
-        for chunk_text, chunk_offset in chunks:
-            # Tokenize
-            inputs = tokenizer(
-                chunk_text,
+            encoding = tokenizer(
+                word_tokens,
                 return_tensors="pt",
-                return_offsets_mapping=True,
+                is_split_into_words=True,
                 truncation=True,
                 max_length=tokenizer.model_max_length,
+                padding=True,
             )
+            word_ids = encoding.word_ids(batch_index=0)
+            inputs = {k: v.to(device) for k, v in encoding.items()}
 
-            offset_mapping = inputs.pop("offset_mapping")[0]
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-
-            # Run inference
             with torch.no_grad():
                 outputs = model(**inputs)
 
-            # outputs is a list of predictions per entity type (sorted by entity type)
             sorted_entity_types = sorted(entity_types)
-
             for ent_idx, entity_type in enumerate(sorted_entity_types):
-                predictions = outputs[ent_idx][0]  # Get first batch item
+                predictions = outputs[ent_idx][0]
+                seen_words = set()
+                tagged_tokens = []
 
-                # Convert predictions to entities
-                current_entity = None
-                current_start = None
-                current_end = None
-
-                for token_idx, (pred_id, (start, end)) in enumerate(
-                    zip(predictions, offset_mapping)
-                ):
-                    if start == end:  # Skip special tokens
+                for token_idx, word_idx in enumerate(word_ids):
+                    if word_idx is None or word_idx in seen_words:
                         continue
 
-                    pred_id = int(pred_id)
+                    seen_words.add(word_idx)
+                    pred_id = int(predictions[token_idx])
                     label = id2label.get(str(pred_id), id2label.get(pred_id, "O"))
-
-                    if label.startswith("B-"):
-                        # Save previous entity if exists
-                        if current_entity is not None:
-                            entity_text = chunk_text[current_start:current_end]
-                            results.append(
-                                {
-                                    "filename": doc_id,
-                                    "label": current_entity,
-                                    "start_span": chunk_offset + current_start,
-                                    "end_span": chunk_offset + current_end,
-                                    "text": entity_text,
-                                }
-                            )
-                        # Start new entity
-                        current_entity = label[2:]  # Remove B- prefix
-                        current_start = int(start)
-                        current_end = int(end)
-
-                    elif label.startswith("I-") and current_entity is not None:
-                        tag = label[2:]  # Remove I- prefix
-                        if tag == current_entity:
-                            current_end = int(end)
-                        else:
-                            # Different entity type, save previous and start new
-                            entity_text = chunk_text[current_start:current_end]
-                            results.append(
-                                {
-                                    "filename": doc_id,
-                                    "label": current_entity,
-                                    "start_span": chunk_offset + current_start,
-                                    "end_span": chunk_offset + current_end,
-                                    "text": entity_text,
-                                }
-                            )
-                            current_entity = tag
-                            current_start = int(start)
-                            current_end = int(end)
-
-                    else:  # O tag or I- without B-
-                        if current_entity is not None:
-                            entity_text = chunk_text[current_start:current_end]
-                            results.append(
-                                {
-                                    "filename": doc_id,
-                                    "label": current_entity,
-                                    "start_span": chunk_offset + current_start,
-                                    "end_span": chunk_offset + current_end,
-                                    "text": entity_text,
-                                }
-                            )
-                            current_entity = None
-                            current_start = None
-                            current_end = None
-
-                # Don't forget the last entity
-                if current_entity is not None:
-                    entity_text = chunk_text[current_start:current_end]
-                    results.append(
+                    start, end = word_spans[word_idx]
+                    tagged_tokens.append(
                         {
-                            "filename": doc_id,
-                            "label": current_entity,
-                            "start_span": chunk_offset + current_start,
-                            "end_span": chunk_offset + current_end,
-                            "text": entity_text,
+                            "tag": label,
+                            "start": int(start),
+                            "end": int(end),
                         }
                     )
 
+                if tagged_tokens:
+                    results.extend(
+                        _aggregate_word_level_bio_predictions(
+                            tagged_tokens=tagged_tokens,
+                            chunk_text=chunk_text,
+                            chunk_offset=chunk_offset,
+                            doc_id=doc_id,
+                            default_entity_type=entity_type,
+                        )
+                    )
+
     # Create DataFrame and save to TSV
+    pred_df: Optional[pd.DataFrame] = None
     if results:
-        df = pd.DataFrame(results)
-        df.to_csv(output_tsv_path, sep="\t", index=False)
+        pred_df = pd.DataFrame(results)
+        pred_df.to_csv(output_tsv_path, sep="\t", index=False)
         print(f"Predictions saved to {output_tsv_path}")
         print(f"Total entities found: {len(results)}")
     else:
         print("No entities found in the corpus")
+
+    _write_reference_and_sequence_scores(
+        ref_results=ref_results,
+        pred_df=pred_df,
+        output_dir=output_dir,
+        output_file_prefix=output_file_prefix,
+    )
 
     return results
 
@@ -500,6 +622,7 @@ def inference_multihead(
     corpus_data: List[Dict],
     model_path: str,
     output_dir: str,
+    output_file_prefix: str = "",
     lang: str = "nl",
     max_word_per_chunk: int | None = None,
     trust_remote_code: bool = True,
@@ -521,11 +644,14 @@ def inference_multihead(
     """
     import pandas as pd
     import torch
-    from multiclass.modeling import TokenClassificationModelMultiHead
+
+    from cardioner.multiclass.modeling import TokenClassificationModelMultiHead
 
     # Create output tsv path
-    output_tsv_path = os.path.join(output_dir, "predictions.tsv")
+    output_tsv_path = os.path.join(output_dir, f"{output_file_prefix}predictions.tsv")
     os.makedirs(output_dir, exist_ok=True)
+
+    ref_results = _extract_reference_results(corpus_data)
 
     # Load tokenizer (prefer fast tokenizer, fallback to slow)
     try:
@@ -584,26 +710,27 @@ def inference_multihead(
         doc_id = doc["id"]
         text = doc["text"]
 
-        # Chunk the document
-        chunks = text_splitter.split_text(text)
+        # Chunk the document with robust offset mapping
+        chunks = _split_text_with_indices(text, text_splitter)
 
-        chunk_offset = 0
-        for chunk_text in chunks:
+        for chunk_text, chunk_offset, _chunk_end in chunks:
             if not chunk_text.strip():
-                chunk_offset += len(chunk_text)
                 continue
 
-            # Tokenize
+            word_tokens, word_spans = _get_word_spans(chunk_text)
+            if len(word_tokens) == 0:
+                continue
+
             encoding = tokenizer(
-                chunk_text,
-                return_offsets_mapping=True,
+                word_tokens,
+                return_tensors="pt",
+                is_split_into_words=True,
                 truncation=True,
                 max_length=tokenizer.model_max_length,
-                padding="max_length",
-                return_tensors="pt",
+                padding=True,
             )
 
-            offset_mapping = encoding.pop("offset_mapping")[0].tolist()
+            word_ids = encoding.word_ids(batch_index=0)
 
             # Move to device
             encoding = {k: v.to(device) for k, v in encoding.items()}
@@ -615,93 +742,52 @@ def inference_multihead(
             # Process predictions for each entity type
             for ent_idx, entity_type in enumerate(entity_types):
                 preds = predictions[ent_idx][0].cpu().tolist()
+                seen_words = set()
+                tagged_tokens = []
 
-                # Extract entities using BIO tags
-                current_entity = None
-                current_start = None
-                current_end = None
-
-                for token_idx, (pred, (start, end)) in enumerate(
-                    zip(preds, offset_mapping)
-                ):
-                    if start == 0 and end == 0:
+                for token_idx, word_idx in enumerate(word_ids):
+                    if word_idx is None or word_idx in seen_words:
                         continue
 
+                    seen_words.add(word_idx)
+                    pred = preds[token_idx]
                     tag = id2label.get(pred, "O")
-
-                    if tag.startswith("B"):
-                        if current_entity is not None:
-                            entity_text = chunk_text[current_start:current_end]
-                            results.append(
-                                {
-                                    "filename": doc_id,
-                                    "label": current_entity,
-                                    "start_span": chunk_offset + current_start,
-                                    "end_span": chunk_offset + current_end,
-                                    "text": entity_text,
-                                }
-                            )
-                        current_entity = entity_type
-                        current_start = int(start)
-                        current_end = int(end)
-
-                    elif tag.startswith("I"):
-                        if current_entity == entity_type:
-                            current_end = int(end)
-                        elif current_entity is not None:
-                            entity_text = chunk_text[current_start:current_end]
-                            results.append(
-                                {
-                                    "filename": doc_id,
-                                    "label": current_entity,
-                                    "start_span": chunk_offset + current_start,
-                                    "end_span": chunk_offset + current_end,
-                                    "text": entity_text,
-                                }
-                            )
-                            current_entity = entity_type
-                            current_start = int(start)
-                            current_end = int(end)
-
-                    else:  # O tag
-                        if current_entity is not None:
-                            entity_text = chunk_text[current_start:current_end]
-                            results.append(
-                                {
-                                    "filename": doc_id,
-                                    "label": current_entity,
-                                    "start_span": chunk_offset + current_start,
-                                    "end_span": chunk_offset + current_end,
-                                    "text": entity_text,
-                                }
-                            )
-                            current_entity = None
-                            current_start = None
-                            current_end = None
-
-                # Don't forget the last entity
-                if current_entity is not None:
-                    entity_text = chunk_text[current_start:current_end]
-                    results.append(
+                    start, end = word_spans[word_idx]
+                    tagged_tokens.append(
                         {
-                            "filename": doc_id,
-                            "label": current_entity,
-                            "start_span": chunk_offset + current_start,
-                            "end_span": chunk_offset + current_end,
-                            "text": entity_text,
+                            "tag": tag,
+                            "start": int(start),
+                            "end": int(end),
                         }
                     )
 
-            chunk_offset += len(chunk_text)
+                if tagged_tokens:
+                    results.extend(
+                        _aggregate_word_level_bio_predictions(
+                            tagged_tokens=tagged_tokens,
+                            chunk_text=chunk_text,
+                            chunk_offset=chunk_offset,
+                            doc_id=doc_id,
+                            default_entity_type=entity_type,
+                        )
+                    )
 
     # Create DataFrame and save to TSV
+    pred_df: Optional[pd.DataFrame] = None
     if results:
-        df = pd.DataFrame(results)
-        df.to_csv(output_tsv_path, sep="\t", index=False)
+        pred_df = pd.DataFrame(results)
+        pred_df.to_csv(output_tsv_path, sep="\t", index=False)
         print(f"Predictions saved to {output_tsv_path}")
         print(f"Total entities found: {len(results)}")
     else:
         print("No entities found in the corpus")
+
+    _write_reference_and_sequence_scores(
+        ref_results=ref_results,
+        pred_df=pred_df,
+        output_dir=output_dir,
+        output_file_prefix=output_file_prefix,
+    )
 
     return results
 
@@ -819,7 +905,12 @@ def prepare(
         )
 
     tokenizer = AutoTokenizer.from_pretrained(
-        Model, add_prefix_space=True, token=hf_token
+        Model,
+        add_prefix_space=True,
+        token=hf_token,
+        rust_remote_code=False,
+        force_download=True,
+        local_files_only=False,
     )
     tokenizer.model_max_length = max_length
 
@@ -968,6 +1059,9 @@ def prepare_multihead(
         Model,
         add_prefix_space=True,
         token=hf_token,
+        trust_remote_code=False,
+        force_download=True,
+        local_files_only=False,
     )
     tokenizer.model_max_length = max_length
 
@@ -1266,10 +1360,8 @@ def train(
                 "test_ids": [d["id"] for d in test_data],
                 "test_gids": [d["gid"] for d in test_data],
             }
-            if (
-                (tokenized_data_validation is not None)
-                and (len(tokenized_data_validation) > 0)
-                and (force_splitter == True)
+            if (tokenized_data_validation is not None) and (
+                len(tokenized_data_validation) > 0
             ):
                 split_export["validation_ids"] = [
                     d["id"] for d in tokenized_data_validation
@@ -1281,10 +1373,8 @@ def train(
             with open(split_path, "w", encoding="utf-8") as fw:
                 json.dump(split_export, fw, indent=2)
 
-            if (
-                (tokenized_data_validation is not None)
-                and (len(tokenized_data_validation) > 0)
-                and (force_splitter == True)
+            if (tokenized_data_validation is not None) and (
+                len(tokenized_data_validation) > 0
             ):
                 TrainClass.train(
                     train_data=train_data,
@@ -1295,11 +1385,8 @@ def train(
             else:
                 TrainClass.train(
                     train_data=train_data,
-                    test_data=[],
-                    eval_data=tokenized_data_validation
-                    if (tokenized_data_validation is not None)
-                    and (len(tokenized_data_validation) > 0)
-                    else test_data,
+                    test_data=test_data,
+                    eval_data=test_data,
                     profile=profile,
                 )
         # perform model merger
@@ -1328,7 +1415,7 @@ def train(
                 list_of_model_locations[0], trust_remote_code=True
             )
             model_averaged = AutoModelForTokenClassification.from_config(
-                config=model_config, trust_remote_code=True
+                config=model_config, trust_remote_code=True, use_safetensors=True
             )
             missing, unexpected = model_averaged.load_state_dict(
                 new_state_dict, strict=False
@@ -1897,8 +1984,24 @@ if __name__ == "__main__":
             )
             corpus_inference_list = []
             with open(corpus_inference, "r", encoding="utf-8") as fr:
-                for line in fr:
-                    corpus_inference_list.append(json.loads(line))
+                content = fr.read()
+
+            # Check if file is JSON or JSONL
+            content = content.strip()
+            if content.startswith("["):
+                # JSON format: load entire file and extract test_ids/val_ids
+                corpus_data = json.loads(content)
+                if isinstance(corpus_data, dict):
+                    corpus_inference_list = corpus_data.get("test_ids", []).extend(
+                        corpus_data.get("val_ids", [])
+                    )
+                else:
+                    corpus_inference_list = corpus_data
+            else:
+                # JSONL format: parse line by line
+                for line in content.split("\n"):
+                    if line.strip():
+                        corpus_inference_list.append(json.loads(line))
 
         # If split_file is provided, filter to only test_files
         if split_file is not None:
@@ -1908,7 +2011,10 @@ if __name__ == "__main__":
             with open(split_file, "r", encoding="utf-8") as fr:
                 split_data = json.load(fr)
 
-            test_file_ids = [entry.strip(".txt") for entry in split_data["test_gids"]]
+            _test_ids = split_data.get("test_gids", []) or split_data.get(
+                "test_ids", []
+            )
+            test_file_ids = [entry.strip(".txt") for entry in _test_ids]
 
             original_count = len(corpus_inference_list)
             corpus_inference_list = [
@@ -1978,27 +2084,42 @@ if __name__ == "__main__":
                 )
 
         if is_multihead_crf:
-            print("Detected MultiHead CRF model, using specialized inference...")
+            print(50 * "=", flush=True)
+            print(
+                "Detected MultiHead CRF model, using specialized inference...",
+                flush=True,
+            )
+            print(50 * "=", flush=True)
             inference_multihead_crf(
                 corpus_data=corpus_inference_list,
                 model_path=args.model_path,
                 output_dir=args.output_dir,
+                output_file_prefix=args.output_file_prefix,
                 lang=lang,
                 max_word_per_chunk=None,  # Auto-detect from tokenizer
                 trust_remote_code=True,  # Always true for multihead CRF
             )
         elif is_multihead:
-            print("Detected MultiHead model (no CRF), using specialized inference...")
+            print(50 * "=", flush=True)
+            print(
+                "Detected MultiHead model (no CRF), using specialized inference...",
+                flush=True,
+            )
+            print(50 * "=", flush=True)
             inference_multihead(
                 corpus_data=corpus_inference_list,
                 model_path=args.model_path,
                 output_dir=args.output_dir,
+                output_file_prefix=args.output_file_prefix,
                 lang=lang,
                 max_word_per_chunk=None,  # Auto-detect from tokenizer
                 trust_remote_code=True,  # Always true for multihead
             )
         else:
             # Run standard inference
+            print(50 * "=")
+            print("Running standard inference multiclass or multilabel")
+            print(50 * "=")
             inference(
                 corpus_data=corpus_inference_list,
                 model_path=args.model_path,
@@ -2084,7 +2205,7 @@ if __name__ == "__main__":
             # TODO: check if the split file is correct, seems redundant to have separate entries for class/language.
             corpus_folds = split_data["folds"]
             corpus_validation_ids = [
-                entry.strip(".txt") for entry in split_data["test_files"]
+                entry.strip(".txt") for entry in split_data.get("test_files", [])
             ]  # split_data #[lang]["validation"]["symp"]
 
         corpus_train_id_lists = [

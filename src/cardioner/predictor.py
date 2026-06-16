@@ -409,7 +409,11 @@ class PredictionNER:
 
         # TODO: add non-IOB version
         def finalize_entity(entity):
-            if all(s >= confidence_threshold for s in entity["scores"]):
+            scores = np.array(entity["scores"])
+            median_score = np.median(scores)
+            min_score = np.min(scores)
+            
+            if (median_score >= confidence_threshold) and min_score>0.1:
                 entity_text = original_text[entity["start"] : entity["end"]]
                 if not is_special_char(entity_text):
                     entity["text"] = entity_text

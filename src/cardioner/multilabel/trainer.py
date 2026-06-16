@@ -2,6 +2,7 @@ import glob
 import os
 import shutil
 from os import environ
+from pathlib import Path
 
 environ["WANDB_MODE"] = "disabled"
 environ["WANDB_DISABLED"] = "true"
@@ -189,14 +190,17 @@ class MultiLabelTokenClassificationModelHF(PreTrainedModel):
 
         # Create a clean config for the backbone
         backbone_config = AutoConfig.from_pretrained(
-            backbone_name, trust_remote_code=True
+            backbone_name, trust_remote_code=True, use_safetensors=True
         )
         backbone_config.hidden_dropout_prob = getattr(
             config, "hidden_dropout_prob", 0.1
         )
 
         self.roberta = AutoModel.from_pretrained(
-            backbone_name, config=backbone_config, trust_remote_code=True
+            backbone_name,
+            config=backbone_config,
+            trust_remote_code=True,
+            use_safetensors=True,
         )
 
         # Store backbone_model_name in config for future loading
@@ -566,7 +570,7 @@ class ModelTrainer:
                 "Warning: You are now creating a custom model class which requires trust_remote_code=True to load!"
             )
             base_model = AutoModel.from_pretrained(
-                model, token=hf_token, trust_remote_code=True
+                model, token=hf_token, trust_remote_code=True, use_safetensors=True
             )
 
             # Store custom parameters in config for proper saving/loading
@@ -593,7 +597,7 @@ class ModelTrainer:
             self.custom_model = True
         else:
             self.model = MultiLabelTokenClassificationModelHF.from_pretrained(
-                model, config=or_config
+                model, config=or_config, use_safetensors=True
             )
             self.custom_model = False
             self.or_config = or_config
@@ -884,9 +888,13 @@ class ModelTrainer:
                     shutil.move(trainer_state_src, trainer_state_dst)
                     print(f"Moved trainer_state.json to {trainer_state_dst}")
 
-                # Remove the checkpoint directory
-                shutil.rmtree(checkpoint_dir)
-                print(f"Removed checkpoint directory: {checkpoint_dir}")
+                # Remove only real checkpoint directories
+                checkpoint_dir_resolved = Path(checkpoint_dir).resolve()
+                if checkpoint_dir_resolved.name.startswith("checkpoint-"):
+                    shutil.rmtree(checkpoint_dir)
+                    print(f"Removed checkpoint directory: {checkpoint_dir}")
+                else:
+                    print(f"Skipped non-checkpoint directory: {checkpoint_dir}")
 
         except Exception as e:
             raise ValueError(f"Failed to save model and metrics: {str(e)}")

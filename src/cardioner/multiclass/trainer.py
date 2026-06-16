@@ -1,7 +1,9 @@
+import glob
 import json
 import os
 import shutil
 from os import environ
+from pathlib import Path
 
 import spacy
 
@@ -226,7 +228,10 @@ class ModelTrainer:
                 )
             print("USING CRF:", self.crf)
             base_model = RobertaForTokenClassification.from_pretrained(
-                model, config=or_config, ignore_mismatched_sizes=True
+                model,
+                config=or_config,
+                ignore_mismatched_sizes=True,
+                use_safetensors=True,
             )
             self.model = TokenClassificationModelCRF(
                 or_config,
@@ -251,10 +256,14 @@ class ModelTrainer:
                     config=or_config,
                     add_pooling_layer=False,
                     trust_remote_code=True,
+                    use_safetensors=True,
                 )
             except TypeError:
                 base_model = AutoModel.from_pretrained(
-                    model, config=or_config, trust_remote_code=True
+                    model,
+                    config=or_config,
+                    trust_remote_code=True,
+                    use_safetensors=True,
                 )
             self.model = TokenClassificationModel(or_config, base_model=base_model)
 
@@ -522,16 +531,37 @@ class ModelTrainer:
         # TODO: if there is a test set and evaluation set, evaluate on the eval set
         metrics = trainer.evaluate(eval_dataset=eval_data)
         self.model = self.model.to(dtype=torch.bfloat16)
+        save_dir = self.output_dir
         try:
-            trainer.save_model(self.output_dir)
-            trainer.save_metrics(self.output_dir, metrics=metrics)
+            trainer.save_model(save_dir)
+            trainer.save_metrics(save_dir, metrics=metrics)
         except Exception as e:
             try:
-                trainer.save_model("output")
-                trainer.save_metrics("output", metrics=metrics)
+                save_dir = "output"
+                trainer.save_model(save_dir)
+                trainer.save_metrics(save_dir, metrics=metrics)
                 print(f"Saved to fallback directory 'output' due to error: {str(e)}")
             except Exception as e2:
                 raise ValueError(f"Failed to save model and metrics: {str(e2)}")
+
+        checkpoint_dirs = glob.glob(os.path.join(save_dir, "checkpoint-*"))
+        for checkpoint_dir in checkpoint_dirs:
+            trainer_state_src = os.path.join(checkpoint_dir, "trainer_state.json")
+            trainer_state_dst = os.path.join(save_dir, "trainer_state.json")
+
+            # Move trainer_state.json if it exists
+            if os.path.exists(trainer_state_src):
+                shutil.move(trainer_state_src, trainer_state_dst)
+                print(f"Moved trainer_state.json to {trainer_state_dst}")
+
+            # Remove only real checkpoint directories
+            checkpoint_dir_resolved = Path(checkpoint_dir).resolve()
+            if checkpoint_dir_resolved.name.startswith("checkpoint-"):
+                shutil.rmtree(checkpoint_dir)
+                print(f"Removed checkpoint directory: {checkpoint_dir}")
+            else:
+                print(f"Skipped non-checkpoint directory: {checkpoint_dir}")
+
         torch.cuda.empty_cache()
         return True
 
@@ -739,6 +769,7 @@ class MultiHeadCRFTrainer:
                 token=hf_token,
                 add_pooling_layer=False,
                 trust_remote_code=True,
+                use_safetensors=True,
             )
         except TypeError:
             base_model = AutoModel.from_pretrained(
@@ -746,6 +777,7 @@ class MultiHeadCRFTrainer:
                 config=base_config,
                 token=hf_token,
                 trust_remote_code=True,
+                use_safetensors=True,
             )
         self.model = TokenClassificationModelMultiHeadCRF(
             config, base_model, freeze_backbone
@@ -788,6 +820,7 @@ class MultiHeadCRFTrainer:
         predictions_dict, labels_dict = eval_preds
 
         all_metrics = {}
+        per_entity_f1 = []
 
         for entity_type in self.entity_types:
             if entity_type not in predictions_dict or entity_type not in labels_dict:
@@ -826,6 +859,13 @@ class MultiHeadCRFTrainer:
                 # Prefix metrics with entity type
                 for key, value in entity_metrics.items():
                     all_metrics[f"{entity_type}_{key}"] = value
+
+                # Track entity-level F1 for model selection
+                per_entity_f1.append(entity_metrics.get("overall_f1", 0.0))
+
+        # Required by TrainingArguments(metric_for_best_model="macro_f1")
+        if per_entity_f1:
+            all_metrics["macro_f1"] = sum(per_entity_f1) / len(per_entity_f1)
 
         return all_metrics
 
@@ -974,14 +1014,34 @@ class MultiHeadCRFTrainer:
 
         # Save model
         self.model = self.model.to(dtype=torch.bfloat16)
+        save_dir = self.output_dir
         try:
-            trainer.save_model(self.output_dir)
+            trainer.save_model(save_dir)
         except Exception as e:
             print(f"Error saving model: {e}")
             try:
-                trainer.save_model("output")
+                save_dir = "output"
+                trainer.save_model(save_dir)
             except Exception as e2:
                 raise ValueError(f"Failed to save model: {e2}")
+
+        checkpoint_dirs = glob.glob(os.path.join(save_dir, "checkpoint-*"))
+        for checkpoint_dir in checkpoint_dirs:
+            trainer_state_src = os.path.join(checkpoint_dir, "trainer_state.json")
+            trainer_state_dst = os.path.join(save_dir, "trainer_state.json")
+
+            # Move trainer_state.json if it exists
+            if os.path.exists(trainer_state_src):
+                shutil.move(trainer_state_src, trainer_state_dst)
+                print(f"Moved trainer_state.json to {trainer_state_dst}")
+
+            # Remove only real checkpoint directories
+            checkpoint_dir_resolved = Path(checkpoint_dir).resolve()
+            if checkpoint_dir_resolved.name.startswith("checkpoint-"):
+                shutil.rmtree(checkpoint_dir)
+                print(f"Removed checkpoint directory: {checkpoint_dir}")
+            else:
+                print(f"Skipped non-checkpoint directory: {checkpoint_dir}")
 
         torch.cuda.empty_cache()
         return metrics
@@ -1119,6 +1179,7 @@ class MultiHeadTrainer:
                 token=hf_token,
                 add_pooling_layer=False,
                 trust_remote_code=True,
+                use_safetensors=True,
             )
         except TypeError:
             base_model = AutoModel.from_pretrained(
@@ -1126,6 +1187,7 @@ class MultiHeadTrainer:
                 config=base_config,
                 token=hf_token,
                 trust_remote_code=True,
+                use_safetensors=True,
             )
         self.model = TokenClassificationModelMultiHead(
             config, base_model, freeze_backbone
@@ -1340,14 +1402,34 @@ class MultiHeadTrainer:
 
         # Save model
         self.model = self.model.to(dtype=torch.bfloat16)
+        save_dir = self.output_dir
         try:
-            trainer.save_model(self.output_dir)
+            trainer.save_model(save_dir)
         except Exception as e:
             print(f"Error saving model: {e}")
             try:
-                trainer.save_model("output")
+                save_dir = "output"
+                trainer.save_model(save_dir)
             except Exception as e2:
                 raise ValueError(f"Failed to save model: {e2}")
+
+        checkpoint_dirs = glob.glob(os.path.join(save_dir, "checkpoint-*"))
+        for checkpoint_dir in checkpoint_dirs:
+            trainer_state_src = os.path.join(checkpoint_dir, "trainer_state.json")
+            trainer_state_dst = os.path.join(save_dir, "trainer_state.json")
+
+            # Move trainer_state.json if it exists
+            if os.path.exists(trainer_state_src):
+                shutil.move(trainer_state_src, trainer_state_dst)
+                print(f"Moved trainer_state.json to {trainer_state_dst}")
+
+            # Remove only real checkpoint directories
+            checkpoint_dir_resolved = Path(checkpoint_dir).resolve()
+            if checkpoint_dir_resolved.name.startswith("checkpoint-"):
+                shutil.rmtree(checkpoint_dir)
+                print(f"Removed checkpoint directory: {checkpoint_dir}")
+            else:
+                print(f"Skipped non-checkpoint directory: {checkpoint_dir}")
 
         torch.cuda.empty_cache()
         return metrics
