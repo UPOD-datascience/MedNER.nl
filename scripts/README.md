@@ -4,3 +4,4 @@ Training scripts for:
 * [x] mirrorBERT pretraining
 * [ ] KRISSBERT pretraining
 * [ ] cross-encoder pretraining
+* [ ] hyperbolic embedder based on SNOMED-CT/UMLS graph
