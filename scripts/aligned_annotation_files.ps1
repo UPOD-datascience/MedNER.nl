@@ -1,4 +1,4 @@
-$langs   = @("cz", "sv", "en", "nl", "ro", "it", "es")
+$langs   = @("ro") # "cz", "sv", "en", "nl", "it", "es",
 
 $errors = @()
 
@@ -13,7 +13,8 @@ foreach ($lang in $langs) {
                 --json_dir="$annDir" `
                 --out_path="$outPath" `
                 --report_path="$reportPath" `
-				--similarity_threshold=0.75
+				--similarity_threshold=0.75 `
+				--max_text_variants=3`
 
             if ($LASTEXITCODE -ne 0) {
                 $msg = "Failed at batch=$batch lang=$lang (exit code $LASTEXITCODE)"

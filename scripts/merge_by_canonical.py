@@ -561,6 +561,15 @@ def parse_args() -> argparse.Namespace:
         help="Fallback context similarity threshold; must score > threshold (default: 0.6).",
     )
     parser.add_argument(
+        "--max_text_variants",
+        type=int,
+        default=None,
+        help=(
+            "Optional safeguard: fail fast when a normalized id has more than this "
+            "many unique text variants."
+        ),
+    )
+    parser.add_argument(
         "--prune_terms",
         nargs="+",
         default=PRUNED_FROM_IDS,
@@ -607,6 +616,10 @@ def main() -> None:
         print("Error: --similarity_threshold must be in [0, 1]", file=sys.stderr)
         sys.exit(1)
 
+    if args.max_text_variants is not None and args.max_text_variants < 1:
+        print("Error: --max_text_variants must be >= 1", file=sys.stderr)
+        sys.exit(1)
+
     json_dir: Path = args.json_dir.resolve()
     out_path: Path = args.out_path.resolve()
 
@@ -634,11 +647,41 @@ def main() -> None:
         print(f"  - {f.name}")
     print(f"Context window   : {args.context_window}")
     print(f"Sim threshold    : > {args.similarity_threshold}")
+    print(
+        "Max text variants: "
+        f"{args.max_text_variants if args.max_text_variants is not None else 'disabled'}"
+    )
     print()
 
     records_by_id, skipped = load_records(
         json_files=json_files, prune_terms=args.prune_terms
     )
+
+    variant_counts = {
+        doc_id: len(set(r.text for r in records))
+        for doc_id, records in records_by_id.items()
+    }
+
+    if args.max_text_variants is not None:
+        offenders = [
+            (doc_id, variant_counts[doc_id])
+            for doc_id in sorted(variant_counts.keys())
+            if variant_counts[doc_id] > args.max_text_variants
+        ]
+        if offenders:
+            print(
+                "Error: found ids exceeding --max_text_variants "
+                f"({args.max_text_variants}).",
+                file=sys.stderr,
+            )
+            for doc_id, count in offenders[:20]:
+                print(f"  - id={doc_id} variants={count}", file=sys.stderr)
+            if len(offenders) > 20:
+                print(
+                    f"  ... and {len(offenders) - 20} more ids",
+                    file=sys.stderr,
+                )
+            sys.exit(1)
 
     total_docs = len(records_by_id)
     identical_docs = 0
@@ -654,7 +697,13 @@ def main() -> None:
     merged_rows: list[dict[str, Any]] = []
     per_doc_report: list[dict[str, Any]] = []
 
-    for doc_id in sorted(records_by_id.keys()):
+    doc_ids = sorted(records_by_id.keys())
+    show_progress = total_docs > 0
+
+    for idx, doc_id in enumerate(doc_ids, start=1):
+        if show_progress:
+            print(f"\rProcessing texts: {idx}/{total_docs}", end="", flush=True)
+
         records = records_by_id[doc_id]
         total_input_tags += sum(len(r.tags) for r in records)
 
@@ -691,13 +740,17 @@ def main() -> None:
         total_sequence_hits += result.sequence_match_hits
         total_context_hits += result.context_hits
 
-        unique_text_variants = len(set(r.text for r in records))
+        unique_text_variants = variant_counts[doc_id]
         if args.verbose and unique_text_variants > 1:
+            if show_progress:
+                print()
             print(
                 f"[canonical] id={doc_id} variants={unique_text_variants} "
                 f"retained={result.retained_raw} dropped={result.dropped_raw} "
                 f"dedup_tags={len(mapped_tags)}"
             )
+            if show_progress:
+                print(f"\rProcessing texts: {idx}/{total_docs}", end="", flush=True)
 
         per_doc_report.append(
             {
@@ -713,6 +766,9 @@ def main() -> None:
                 "context_hits": result.context_hits,
             }
         )
+
+    if show_progress:
+        print()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
