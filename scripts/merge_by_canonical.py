@@ -235,8 +235,18 @@ def align_span(
     max_start = max(0, len(anchor_text) - len(span_text))
     estimated_start = max(0, min(max_start, estimated_start))
 
-    # 1) Exact substring match in anchor text.
-    exact_occurrences = find_all_occurrences(anchor_text, span_text)
+    # 1) Exact substring match near the estimated anchor location.
+    exact_radius = context_window * 2
+    exact_search_start = max(0, estimated_start - exact_radius)
+    exact_search_end = min(
+        len(anchor_text),
+        estimated_start + len(span_text) + exact_radius,
+    )
+    anchor_slice = anchor_text[exact_search_start:exact_search_end]
+    exact_occurrences = [
+        exact_search_start + pos
+        for pos in find_all_occurrences(anchor_slice, span_text)
+    ]
     if exact_occurrences:
         if len(exact_occurrences) > max_candidates:
             exact_occurrences = sorted(
@@ -257,7 +267,7 @@ def align_span(
         )
 
     # 2) SequenceMatcher-based search around the expected location.
-    radius = max(context_window, len(span_text) * 2)
+    radius = context_window
     min_span_length = max(1, len(span_text) - max(5, len(span_text) // 4))
     max_span_length = len(span_text) + max(5, len(span_text) // 4)
 
