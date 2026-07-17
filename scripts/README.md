@@ -5,3 +5,4 @@ Training scripts for:
 * [x] Hugging Face NER training (`run_hf_ai4privacy_training.sh`)
 * [ ] KRISSBERT pretraining
 * [ ] cross-encoder pretraining
+* [ ] hyperbolic embedder based on SNOMED-CT/UMLS graph

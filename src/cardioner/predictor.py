@@ -412,8 +412,8 @@ class PredictionNER:
             scores = np.array(entity["scores"])
             median_score = np.median(scores)
             min_score = np.min(scores)
-            
-            if (median_score >= confidence_threshold) and min_score>0.1:
+
+            if (median_score >= confidence_threshold) and min_score > 0.1:
                 entity_text = original_text[entity["start"] : entity["end"]]
                 if not is_special_char(entity_text):
                     entity["text"] = entity_text
@@ -582,14 +582,25 @@ class PredictionNER:
             return [[] for _ in texts]
 
         valid_words = [batch_text_words[i] for i in valid_indices]
-        inputs = self.tokenizer(
-            valid_words,
-            return_tensors="pt",
-            is_split_into_words=True,
-            truncation=True,
-            max_length=self.tokenizer.model_max_length,
-            padding=True,
+        max_len = getattr(self.tokenizer, "model_max_length", None)
+        use_safe_truncation = (
+            isinstance(max_len, int) and max_len > 0 and max_len < 1_000_000
         )
+
+        tokenize_kwargs = {
+            "return_tensors": "pt",
+            "is_split_into_words": True,
+            "padding": True,
+        }
+        if use_safe_truncation:
+            tokenize_kwargs["truncation"] = True
+            tokenize_kwargs["max_length"] = int(max_len)
+        else:
+            # Some tokenizers expose a very large sentinel max length
+            # that can overflow the backend tokenizer when used as truncation max_length.
+            tokenize_kwargs["truncation"] = False
+
+        inputs = self.tokenizer(valid_words, **tokenize_kwargs)
         inputs = inputs.to(self.device)
 
         with torch.no_grad():

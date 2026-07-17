@@ -10,7 +10,7 @@ readme = "README.md"
 packages = [{ include = "cardioner", from = "src" }]
 
 [tool.poetry.dependencies]
-python = ">=3.12,<3.14"
+python = ">=3.13.12,<3.14"
 spacy = "^3.7.5"
 scikit-learn = "^1.5.2"
 scikit-lego = "^0.9.1"
@@ -21,8 +21,7 @@ sentencepiece = "^0.2.1"
 pydantic = "^2.9.2"
 evaluate = "^0.4.3"
 seqeval = "^1.2.2"
-#torchtext = "^0.18.0"
-transformers = "4.57.0"
+transformers = ">=4.57.0"
 torch = {version = "2.6.0", source = "torch" }
 accelerate = "^1.1.1"
 pytorch-crf = "^0.7.2"
@@ -45,6 +44,7 @@ pyarrow = "^22.0.0"
 ipykernel = "^7.1.0"
 rapidfuzz = "^3.14.3"
 langextract = "^1.2.0"
+gradio = "^6.19.0"
 
 [build-system]
 requires = ["poetry-core"]
