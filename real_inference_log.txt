@@ -1,0 +1,36 @@
+[2026-05-21 13:37:12] Starting language: sv from T:/laupodteam/AIOS/Bram/notebooks/code_dev/CardioNER.nl/assets/MultiClinNER/MultiClinNER-sv/disease.json
+[2026-05-21 13:37:37] Starting language: nl from T:/laupodteam/AIOS/Bram/notebooks/code_dev/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/disease.json
+[2026-05-21 13:37:50] ERROR for language: nl (exit code 1)
+[2026-05-21 13:37:50] Starting language: nl from T:/laupodteam/AIOS/Bram/notebooks/code_dev/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/symptom.json
+[2026-05-21 13:38:10] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/disease.json
+[2026-05-21 13:38:28] Finished language: nl
+[2026-05-21 13:38:28] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/symptom.json
+[2026-05-21 13:45:27] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/disease.json
+[2026-05-21 13:46:04] Finished language: nl
+[2026-05-21 13:46:04] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/symptom.json
+[2026-05-21 13:46:45] Finished language: nl
+[2026-05-21 13:46:45] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/procedure.json
+[2026-05-21 13:47:25] Finished language: nl
+[2026-05-21 13:47:25] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/disease.json
+[2026-05-21 13:47:52] ERROR for language: nl (exit code 1)
+[2026-05-21 13:47:52] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/symptom.json
+[2026-05-21 13:48:07] ERROR for language: nl (exit code 1)
+[2026-05-21 13:48:07] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/procedure.json
+[2026-05-21 14:21:37] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/disease.json
+[2026-05-21 14:21:59] Finished language: nl
+[2026-05-21 14:21:59] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/symptom.json
+[2026-05-21 14:22:21] Finished language: nl
+[2026-05-21 14:22:21] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/procedure.json
+[2026-05-21 14:22:43] Finished language: nl
+[2026-05-22 14:20:26] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/disease.json
+[2026-05-22 14:20:47] Finished language: nl
+[2026-05-22 14:20:47] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/symptom.json
+[2026-05-22 14:21:08] Finished language: nl
+[2026-05-22 14:21:08] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/procedure.json
+[2026-05-22 14:21:22] ERROR for language: nl (exit code 1)
+[2026-05-22 14:22:39] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/disease.json
+[2026-05-22 14:23:00] Finished language: nl
+[2026-05-22 14:23:00] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/symptom.json
+[2026-05-22 14:23:21] Finished language: nl
+[2026-05-22 14:23:21] Starting language: nl from /media/bramiozo/Storage1/bramiozo/DEV/GIT/UMCU/CardioNER.nl/assets/MultiClinNER/MultiClinNER-nl/procedure.json
+[2026-05-22 14:23:42] Finished language: nl

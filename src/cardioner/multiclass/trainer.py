@@ -73,6 +73,19 @@ from torch import nn
 metric = evaluate.load("seqeval")
 
 
+def _configure_mixed_precision(train_kwargs: Dict[str, object]) -> None:
+    bf16_supported = bool(
+        torch.cuda.is_available()
+        and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+    )
+    train_kwargs["bf16"] = bf16_supported
+    train_kwargs["fp16"] = not bf16_supported
+    print(
+        f"Mixed precision: {'bf16' if bf16_supported else 'fp16'} "
+        f"(cuda_available={torch.cuda.is_available()})"
+    )
+
+
 class CustomDataCollatorForTokenClassification(DataCollatorForTokenClassification):
     def __call__(self, features, *args, **kwargs):
         # Call the superclass method to process the batch
@@ -151,7 +164,6 @@ class ModelTrainer:
             "save_total_limit": 1,
             "report_to": "tensorboard",
             "use_cpu": False,
-            "fp16": True,
             "load_best_model_at_end": True,
             "greater_is_better": True,
             "metric_for_best_model": "overall_f1",
@@ -159,6 +171,7 @@ class ModelTrainer:
             "logging_strategy": "steps",
             "logging_steps": 256,
         }
+        _configure_mixed_precision(self.train_kwargs)
         self.crf = use_crf
 
         if use_crf:
@@ -691,7 +704,6 @@ class MultiHeadCRFTrainer:
             "save_total_limit": 1,
             "report_to": "tensorboard",
             "use_cpu": False,
-            "fp16": True,
             "load_best_model_at_end": True,
             "greater_is_better": True,
             "metric_for_best_model": "macro_f1",
@@ -699,6 +711,7 @@ class MultiHeadCRFTrainer:
             "logging_strategy": "steps",
             "logging_steps": 256,
         }
+        _configure_mixed_precision(self.train_kwargs)
 
         # Load tokenizer
         if tokenizer is None:
@@ -1100,7 +1113,6 @@ class MultiHeadTrainer:
             "save_total_limit": 1,
             "report_to": "tensorboard",
             "use_cpu": False,
-            "fp16": True,
             "load_best_model_at_end": True,
             "greater_is_better": True,
             "metric_for_best_model": "macro_f1",
@@ -1108,6 +1120,7 @@ class MultiHeadTrainer:
             "logging_strategy": "steps",
             "logging_steps": 256,
         }
+        _configure_mixed_precision(self.train_kwargs)
 
         # Load tokenizer
         if tokenizer is None:

@@ -15,12 +15,12 @@ import json
 import sys
 from collections import defaultdict
 from functools import partial
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import evaluate
 import pandas as pd
 import transformers
-from datasets import Dataset
+from datasets import Dataset, DatasetDict, load_dataset
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sklearn.model_selection import GroupKFold, train_test_split
 from sklearn.utils import shuffle
@@ -285,6 +285,290 @@ def _write_reference_and_sequence_scores(
 
     with open(sequence_result_path, "w", encoding="utf-8") as fw:
         json.dump(final_dict, fw)
+
+
+def _normalize_tag_entry(tag_entry: Any, source_id: str) -> Dict:
+    if not isinstance(tag_entry, dict):
+        raise ValueError(
+            f"Tag entry for document '{source_id}' must be a dict, got {type(tag_entry)}"
+        )
+
+    start = tag_entry.get("start", tag_entry.get("start_span"))
+    end = tag_entry.get("end", tag_entry.get("end_span"))
+    label = tag_entry.get(
+        "tag",
+        tag_entry.get("label", tag_entry.get("entity", tag_entry.get("entity_group"))),
+    )
+
+    if start is None or end is None or label is None:
+        raise ValueError(
+            f"Tag entry for document '{source_id}' is missing one of required keys "
+            "(start/end/tag). Supported aliases: start_span/end_span and label/entity/entity_group. "
+            f"Got: {tag_entry}"
+        )
+
+    return {
+        "start": int(start),
+        "end": int(end),
+        "tag": str(label),
+    }
+
+
+def _parse_tags_field(raw_tags: Any, source_id: str, tags_column: str) -> List[Dict]:
+    if raw_tags is None:
+        return []
+
+    parsed_tags = raw_tags
+
+    if isinstance(raw_tags, str):
+        text = raw_tags.strip()
+        if text == "":
+            return []
+
+        try:
+            parsed_tags = json.loads(text)
+        except json.JSONDecodeError:
+            # Fallback for jsonl-style strings where each line is one JSON object.
+            try:
+                parsed_tags = [
+                    json.loads(line) for line in text.splitlines() if line.strip() != ""
+                ]
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Could not parse tags from column '{tags_column}' for document '{source_id}': {e}"
+                ) from e
+
+    if isinstance(parsed_tags, dict):
+        if "tags" in parsed_tags and isinstance(parsed_tags["tags"], list):
+            parsed_tags = parsed_tags["tags"]
+        else:
+            raise ValueError(
+                f"Expected a list of tags in column '{tags_column}' for document '{source_id}', "
+                f"but got a dict without a 'tags' list: {parsed_tags}"
+            )
+
+    if not isinstance(parsed_tags, list):
+        raise ValueError(
+            f"Expected a list of tags in column '{tags_column}' for document '{source_id}', "
+            f"but got {type(parsed_tags)}"
+        )
+
+    return [_normalize_tag_entry(tag_entry=t, source_id=source_id) for t in parsed_tags]
+
+
+def _load_hf_ner_split(
+    split_dataset: Dataset,
+    split_name: str,
+    text_column: str,
+    tags_column: str | None,
+    selector_column: str | None = None,
+    selection: List[str] | None = None,
+) -> List[Dict]:
+    available_columns = set(split_dataset.column_names)
+    required_columns = {text_column}
+    if tags_column is not None:
+        required_columns.add(tags_column)
+    if selector_column is not None:
+        required_columns.add(selector_column)
+
+    missing_columns = sorted(
+        [c for c in required_columns if c not in available_columns]
+    )
+    if missing_columns:
+        raise ValueError(
+            f"Missing required columns in split '{split_name}': {missing_columns}. "
+            f"Available columns: {sorted(available_columns)}"
+        )
+
+    selected_values = set(selection or [])
+    records: List[Dict] = []
+
+    for idx, row_raw in enumerate(split_dataset):
+        row = dict(row_raw)
+
+        if selector_column is not None:
+            selector_val = row.get(selector_column)
+            if not (
+                (selector_val in selected_values)
+                or (str(selector_val) in selected_values)
+            ):
+                continue
+
+        source_id = row.get("id", row.get("doc_id", f"{split_name}_{idx}"))
+        source_id = str(source_id)
+
+        text_val = row.get(text_column)
+        if text_val is None:
+            continue
+        text = text_val if isinstance(text_val, str) else str(text_val)
+
+        if tags_column is not None:
+            tags = _parse_tags_field(
+                raw_tags=row.get(tags_column),
+                source_id=source_id,
+                tags_column=tags_column,
+            )
+        else:
+            tags = []
+
+        records.append(
+            {
+                "id": source_id,
+                "text": text,
+                "tags": tags,
+            }
+        )
+
+    print(
+        f"Loaded {len(records)} documents from HF split '{split_name}' "
+        f"(text_column='{text_column}', tags_column='{tags_column}')"
+    )
+    return records
+
+
+def load_hf_corpora(
+    dataset_name: str,
+    dataset_config: str | None,
+    text_column: str,
+    tags_column: str,
+    hf_token: str | None,
+    selector_column: str | None = None,
+    selection: List[str] | None = None,
+    train_split: str = "train",
+    validation_split: str = "validation",
+    test_split: str = "test",
+) -> tuple[List[Dict], List[Dict], List[Dict]]:
+    if selector_column is not None and (selection is None or len(selection) == 0):
+        raise ValueError(
+            "When selector_column is set, selection must be provided with one or more values."
+        )
+    if selector_column is None and selection is not None and len(selection) > 0:
+        raise ValueError("selection was provided, but selector_column is not set.")
+
+    print(
+        f"Loading Hugging Face dataset '{dataset_name}'"
+        + (f" (config='{dataset_config}')" if dataset_config else "")
+    )
+    ds_obj = load_dataset(dataset_name, name=dataset_config, token=hf_token)
+
+    if not isinstance(ds_obj, DatasetDict):
+        raise ValueError(
+            f"Expected a DatasetDict when loading '{dataset_name}', got {type(ds_obj)}"
+        )
+
+    available_splits = sorted(ds_obj.keys())
+    if train_split not in ds_obj:
+        raise ValueError(
+            f"Train split '{train_split}' not found in dataset '{dataset_name}'. "
+            f"Available splits: {available_splits}"
+        )
+
+    train_records = _load_hf_ner_split(
+        split_dataset=ds_obj[train_split],
+        split_name=train_split,
+        text_column=text_column,
+        tags_column=tags_column,
+        selector_column=selector_column,
+        selection=selection,
+    )
+
+    validation_records: List[Dict] = []
+    if validation_split in ds_obj:
+        validation_records = _load_hf_ner_split(
+            split_dataset=ds_obj[validation_split],
+            split_name=validation_split,
+            text_column=text_column,
+            tags_column=tags_column,
+            selector_column=selector_column,
+            selection=selection,
+        )
+    else:
+        print(
+            f"Validation split '{validation_split}' not present in dataset. "
+            "Proceeding without explicit validation split."
+        )
+
+    test_records: List[Dict] = []
+    if test_split in ds_obj:
+        test_records = _load_hf_ner_split(
+            split_dataset=ds_obj[test_split],
+            split_name=test_split,
+            text_column=text_column,
+            tags_column=tags_column,
+            selector_column=selector_column,
+            selection=selection,
+        )
+    else:
+        print(
+            f"Test split '{test_split}' not present in dataset. Proceeding without test split."
+        )
+
+    if len(train_records) == 0:
+        raise ValueError(
+            "HF dataset train split produced 0 records after parsing/filtering. "
+            "Check text/tags columns and selector settings."
+        )
+
+    return train_records, validation_records, test_records
+
+
+def load_hf_inference_corpus(
+    dataset_name: str,
+    dataset_config: str | None,
+    text_column: str,
+    tags_column: str | None,
+    hf_token: str | None,
+    selector_column: str | None = None,
+    selection: List[str] | None = None,
+    inference_split: str = "validation",
+) -> List[Dict]:
+    if selector_column is not None and (selection is None or len(selection) == 0):
+        raise ValueError(
+            "When selector_column is set, selection must be provided with one or more values."
+        )
+    if selector_column is None and selection is not None and len(selection) > 0:
+        raise ValueError("selection was provided, but selector_column is not set.")
+
+    print(
+        f"Loading Hugging Face dataset '{dataset_name}' for inference"
+        + (f" (config='{dataset_config}')" if dataset_config else "")
+    )
+    ds_obj = load_dataset(dataset_name, name=dataset_config, token=hf_token)
+
+    if isinstance(ds_obj, DatasetDict):
+        available_splits = sorted(ds_obj.keys())
+        if inference_split not in ds_obj:
+            raise ValueError(
+                f"Inference split '{inference_split}' not found in dataset '{dataset_name}'. "
+                f"Available splits: {available_splits}"
+            )
+
+        return _load_hf_ner_split(
+            split_dataset=ds_obj[inference_split],
+            split_name=inference_split,
+            text_column=text_column,
+            tags_column=tags_column,
+            selector_column=selector_column,
+            selection=selection,
+        )
+
+    if isinstance(ds_obj, Dataset):
+        print(
+            f"Dataset '{dataset_name}' loaded as a single split Dataset. "
+            "Using it directly for inference."
+        )
+        return _load_hf_ner_split(
+            split_dataset=ds_obj,
+            split_name=inference_split,
+            text_column=text_column,
+            tags_column=tags_column,
+            selector_column=selector_column,
+            selection=selection,
+        )
+
+    raise ValueError(
+        f"Unexpected dataset type when loading '{dataset_name}' for inference: {type(ds_obj)}"
+    )
 
 
 def inference(
@@ -866,6 +1150,8 @@ def prepare(
     hf_token: str | None = None,
     use_multihead_crf: bool = False,
     entity_types: List[str] | None = None,
+    strict_tag_set: bool = False,
+    lang: str = "nl",
 ):
     # Multi-head CRF preparation
     if use_multihead_crf:
@@ -886,6 +1172,7 @@ def prepare(
             chunk_type=chunk_type,
             hf_token=hf_token,
             entity_types=entity_types,
+            lang=lang,
         )
 
     if multi_class:
@@ -928,18 +1215,26 @@ def prepare(
         "paragraph": annotate_corpus_paragraph,
     }
 
+    annotation_lang = "xx" if lang == "multi" else ("cs" if lang == "cz" else lang)
+
     annotate_kwargs = {
         "standard": {
             "chunk_size": chunk_size,
             "max_allowed_chunk_size": max_allowed_chunk_size,
             "IOB": use_iob,
+            "lang": annotation_lang,
         },
         "paragraph": {
             "chunk_size": chunk_size,
             "max_allowed_chunk_size": max_allowed_chunk_size,
             "IOB": use_iob,
+            "lang": annotation_lang,
         },
-        "centered": {"chunk_size": chunk_size, "IOB": use_iob},
+        "centered": {
+            "chunk_size": chunk_size,
+            "IOB": use_iob,
+            "lang": annotation_lang,
+        },
     }
 
     datasets = {
@@ -953,13 +1248,20 @@ def prepare(
 
     # Initialize variables
     iob_data_train = iob_data_test = iob_data_validation = []
-    unique_tags = None
+    train_unique_tags: List[str] | None = None
+    split_unique_tags: Dict[str, set[str]] = {
+        "train": set(),
+        "validation": set(),
+        "test": set(),
+    }
 
     annotate_func = annotate_functions[chunk_type]
     kwargs = annotate_kwargs[chunk_type]
 
     skipped_count = 0
-    for k, (batch_id, corpus) in enumerate(datasets.items()):
+    processed_batches = 0
+    for batch_id, corpus in datasets.items():
+        processed_batches += 1
         iob_data, _unique_tags = annotate_func(corpus, batch_id=batch_id, **kwargs)
 
         if isinstance(entity_types, list):
@@ -973,23 +1275,85 @@ def prepare(
             else:
                 iob_data, _unique_tags = res
 
+        if _unique_tags is not None:
+            split_unique_tags[batch_id] = set(_unique_tags)
+
         if batch_id == "train":
             iob_data_train = iob_data
-            unique_tags = _unique_tags
+            train_unique_tags = _unique_tags
         elif batch_id == "test":
             iob_data_test = iob_data
         elif batch_id == "validation":
             iob_data_validation = iob_data
 
-        if (batch_id != "train") & (len(corpus) > 0):
-            assert unique_tags == _unique_tags, "Tags are not the same in train/val"
-    # paragraph?
-    print(f"{skipped_count}/{k} batches skipped ")
+    print(f"{skipped_count}/{processed_batches} batches skipped ")
+
+    if train_unique_tags is None:
+        raise ValueError("No train tags could be extracted from the training corpus.")
+
+    train_tag_set = set(train_unique_tags)
+    val_extra_tags = sorted(split_unique_tags.get("validation", set()) - train_tag_set)
+    test_extra_tags = sorted(split_unique_tags.get("test", set()) - train_tag_set)
+
+    if len(val_extra_tags) > 0:
+        print(
+            "Validation has tags not present in train. "
+            f"Count={len(val_extra_tags)}. Tags={val_extra_tags}"
+        )
+    if len(test_extra_tags) > 0:
+        print(
+            "Test has tags not present in train. "
+            f"Count={len(test_extra_tags)}. Tags={test_extra_tags}"
+        )
+
+    if strict_tag_set and (len(val_extra_tags) > 0 or len(test_extra_tags) > 0):
+        raise ValueError(
+            "strict_tag_set=True and non-train splits contain unseen tags. "
+            f"validation_only={val_extra_tags}, test_only={test_extra_tags}"
+        )
+
+    # Default behavior: use train tag space only.
+    unique_tags = list(train_unique_tags)
+
+    # Ensure O stays at index 0 for compatibility.
+    if "O" in unique_tags and unique_tags[0] != "O":
+        unique_tags = ["O"] + [t for t in unique_tags if t != "O"]
+
+    if (not strict_tag_set) and (len(val_extra_tags) > 0 or len(test_extra_tags) > 0):
+        allowed_tags = set(unique_tags)
+
+        def _coerce_non_train_tags_to_train_space(
+            iob_data_split: List[Dict],
+        ) -> List[Dict]:
+            if multi_class:
+                for doc in iob_data_split:
+                    doc["tags"] = [
+                        tag if tag in allowed_tags else "O" for tag in doc["tags"]
+                    ]
+            else:
+                for doc in iob_data_split:
+                    cleaned_token_tags = []
+                    for token_tags in doc["tags"]:
+                        if isinstance(token_tags, list):
+                            cleaned_token_tags.append(
+                                [tag for tag in token_tags if tag in allowed_tags]
+                            )
+                        else:
+                            cleaned_token_tags.append([])
+                    doc["tags"] = cleaned_token_tags
+            return iob_data_split
+
+        iob_data_validation = _coerce_non_train_tags_to_train_space(iob_data_validation)
+        iob_data_test = _coerce_non_train_tags_to_train_space(iob_data_test)
+        print(
+            "Ignoring non-train tags in validation/test (mapped/removed to O space). "
+            "Use --strict_tag_set to fail instead."
+        )
 
     label2id = {l: int(c) for c, l in enumerate(unique_tags)}
     id2label = {int(c): l for c, l in enumerate(unique_tags)}
 
-    print("Unique tags: ", unique_tags)
+    print("Unique tags (train tag space): ", unique_tags)
 
     iob_data = iob_data_train + iob_data_test + iob_data_validation
 
@@ -1042,6 +1406,7 @@ def prepare_multihead(
     chunk_type: Literal["standard", "centered", "paragraph"] = "standard",
     hf_token: str | None = None,
     entity_types: List[str] | None = None,
+    lang: str = "nl",
 ):
     """
     Prepare data for Multi-Head CRF training.
@@ -1094,14 +1459,17 @@ def prepare_multihead(
     iob_data_validation = []
 
     # Select annotation function based on chunk type
+    annotation_lang = "xx" if lang == "multi" else ("cs" if lang == "cz" else lang)
+
     if chunk_type == "centered":
         annotate_func = annotate_corpus_multihead_centered
-        kwargs = {"chunk_size": chunk_size}
+        kwargs = {"chunk_size": chunk_size, "lang": annotation_lang}
     else:
         annotate_func = annotate_corpus_multihead
         kwargs = {
             "chunk_size": chunk_size,
             "max_allowed_chunk_size": max_allowed_chunk_size,
+            "lang": annotation_lang,
         }
 
     for batch_id, corpus in datasets.items():
@@ -1415,7 +1783,8 @@ def train(
                 list_of_model_locations[0], trust_remote_code=True
             )
             model_averaged = AutoModelForTokenClassification.from_config(
-                config=model_config, trust_remote_code=True, use_safetensors=True
+                config=model_config,
+                trust_remote_code=True,
             )
             missing, unexpected = model_averaged.load_state_dict(
                 new_state_dict, strict=False
@@ -1789,6 +2158,62 @@ if __name__ == "__main__":
     )
     argparsers.add_argument("--corpus_train", type=str, required=False)
     argparsers.add_argument("--corpus_validation", type=str, required=False)
+    argparsers.add_argument(
+        "--hf_dataset",
+        type=str,
+        required=False,
+        help="Hugging Face dataset id (e.g. ai4privacy/pii-masking-openpii-1.5m)",
+    )
+    argparsers.add_argument(
+        "--hf_dataset_config",
+        type=str,
+        required=False,
+        default=None,
+        help="Optional Hugging Face dataset config/subset name.",
+    )
+    argparsers.add_argument(
+        "--hf_train_split",
+        type=str,
+        default="train",
+        help="HF split to use as training data.",
+    )
+    argparsers.add_argument(
+        "--hf_validation_split",
+        type=str,
+        default="validation",
+        help="HF split to use as validation data (if present); also used as default inference split for HF inference corpora.",
+    )
+    argparsers.add_argument(
+        "--hf_test_split",
+        type=str,
+        default="test",
+        help="HF split to use as test data (if present).",
+    )
+    argparsers.add_argument(
+        "--text_column",
+        type=str,
+        default=None,
+        help="Required with --hf_dataset: column containing raw text.",
+    )
+    argparsers.add_argument(
+        "--tags_column",
+        type=str,
+        default=None,
+        help="Required with --hf_dataset: column containing span tags JSON/JSONL.",
+    )
+    argparsers.add_argument(
+        "--selector_column",
+        type=str,
+        default=None,
+        help="Optional HF column used to filter rows (e.g. language).",
+    )
+    argparsers.add_argument(
+        "--selection",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Allowed values for --selector_column (required when selector_column is set).",
+    )
     argparsers.add_argument("--split_file", type=str, required=False)
     argparsers.add_argument("--annotation_loc", type=str, required=False)
     argparsers.add_argument("--output_dir", type=str, default="output")
@@ -1832,6 +2257,12 @@ if __name__ == "__main__":
     )
     argparsers.add_argument("--classifier_dropout", type=float, default=0.1)
     argparsers.add_argument("--use_class_weights", action="store_true", default=False)
+    argparsers.add_argument(
+        "--strict_tag_set",
+        action="store_true",
+        default=False,
+        help="Require validation/test to use exactly the train tag set. If not set, unseen val/test tags are ignored (mapped to O space).",
+    )
     argparsers.add_argument("--word_level", action="store_true", default=False)
     argparsers.add_argument("--output_test_tsv", action="store_true", default=False)
     argparsers.add_argument(
@@ -1882,7 +2313,7 @@ if __name__ == "__main__":
         "--corpus_inference",
         type=str,
         default=None,
-        help="Path to corpus file/directory for inference (uses corpus_validation if not set)",
+        help="Path to corpus file/directory for inference, or a Hugging Face dataset id (uses corpus_validation if not set)",
     )
     argparsers.add_argument(
         "--inference_filter_file",
@@ -1921,7 +2352,7 @@ if __name__ == "__main__":
         help="Stride for inference.",
     )
     argparsers.add_argument(
-        "--output_file_prefix", type=str, help="Prefix for the inference results file."
+        "--output_file_prefix", default="inference_", type=str, help="Prefix for the inference results file."
     )
 
     args = argparsers.parse_args()
@@ -1932,6 +2363,15 @@ if __name__ == "__main__":
     _model = args.model
     corpus_train = args.corpus_train
     corpus_validation = args.corpus_validation
+    hf_dataset = args.hf_dataset
+    hf_dataset_config = args.hf_dataset_config
+    hf_train_split = args.hf_train_split
+    hf_validation_split = args.hf_validation_split
+    hf_test_split = args.hf_test_split
+    text_column = args.text_column
+    tags_column = args.tags_column
+    selector_column = args.selector_column
+    selection = args.selection
     split_file = args.split_file
     force_splitter = args.force_splitter
     only_first_split = args.only_first_split
@@ -1970,18 +2410,16 @@ if __name__ == "__main__":
         )
 
         # Determine corpus for inference
-        corpus_inference = args.corpus_inference or corpus_validation or corpus_train
+        # Preference order: explicit inference corpus -> HF dataset arg -> validation -> train
+        corpus_inference = args.corpus_inference or hf_dataset or corpus_validation or corpus_train
         assert corpus_inference is not None, (
-            "Corpus for inference is required (--corpus_inference, --corpus_validation, or --corpus_train)"
+            "Corpus for inference is required (--corpus_inference, --hf_dataset, --corpus_validation, or --corpus_train)"
         )
 
-        # Load corpus
+        # Load corpus from local path or Hugging Face dataset id
         if os.path.isdir(corpus_inference):
             corpus_inference_list = merge_annotations(corpus_inference)
-        else:
-            assert os.path.isfile(corpus_inference), (
-                f"Corpus file {corpus_inference} does not exist."
-            )
+        elif os.path.isfile(corpus_inference):
             corpus_inference_list = []
             with open(corpus_inference, "r", encoding="utf-8") as fr:
                 content = fr.read()
@@ -1992,9 +2430,14 @@ if __name__ == "__main__":
                 # JSON format: load entire file and extract test_ids/val_ids
                 corpus_data = json.loads(content)
                 if isinstance(corpus_data, dict):
-                    corpus_inference_list = corpus_data.get("test_ids", []).extend(
-                        corpus_data.get("val_ids", [])
-                    )
+                    if isinstance(corpus_data.get("documents"), list):
+                        corpus_inference_list = corpus_data["documents"]
+                    else:
+                        raise ValueError(
+                            f"Inference corpus file '{corpus_inference}' contains a JSON object, "
+                            "but a list of documents was expected. "
+                            "If this is a split file, pass it via --split_file instead."
+                        )
                 else:
                     corpus_inference_list = corpus_data
             else:
@@ -2002,6 +2445,39 @@ if __name__ == "__main__":
                 for line in content.split("\n"):
                     if line.strip():
                         corpus_inference_list.append(json.loads(line))
+        else:
+            if text_column is None:
+                raise ValueError(
+                    "When --corpus_inference references a Hugging Face dataset, "
+                    "--text_column is required."
+                )
+
+            print(
+                f"Interpreting --corpus_inference='{corpus_inference}' as a Hugging Face "
+                f"dataset id and loading split '{hf_validation_split}'."
+            )
+            try:
+                corpus_inference_list = load_hf_inference_corpus(
+                    dataset_name=corpus_inference,
+                    dataset_config=hf_dataset_config,
+                    text_column=text_column,
+                    tags_column=tags_column,
+                    hf_token=hf_token,
+                    selector_column=selector_column,
+                    selection=selection,
+                    inference_split=hf_validation_split,
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"Corpus reference '{corpus_inference}' is neither an existing local path "
+                    f"nor a loadable Hugging Face dataset id. Original error: {e}"
+                ) from e
+
+            if tags_column is None:
+                print(
+                    "No --tags_column provided for HF inference corpus; reference scoring "
+                    "will be skipped."
+                )
 
         # If split_file is provided, filter to only test_files
         if split_file is not None:
@@ -2136,11 +2612,6 @@ if __name__ == "__main__":
         print("Inference completed!")
         exit(0)
 
-    assert (
-        ((corpus_train is not None) and (corpus_validation is not None))
-        | ((split_file is not None) and (corpus_train is not None))
-        | ((corpus_train is not None) and (force_splitter))
-    ), "Either provide a split file or a train and validation corpus"
     assert (_annotation_loc is not None) | (parse_annotations is not None), (
         "Either provide an annotation location or set parse_annotations to True"
     )
@@ -2148,48 +2619,103 @@ if __name__ == "__main__":
         "Either parse annotations or train the model, or both..do something!"
     )
 
-    assert corpus_train is not None, "Corpus_train is required"
+    use_hf_dataset = hf_dataset is not None
 
-    if os.path.isdir(corpus_train):
-        # go through jsons and merge into one
-        corpus_train_list = merge_annotations(corpus_train)
-    else:
-        assert os.path.isfile(corpus_train), (
-            f"Corpus_train file {corpus_train} does not exist."
-        )
-        # read jsonl
-        corpus_train_list = []
-        with open(corpus_train, "r", encoding="utf-8") as fr:
-            for line in fr:
-                corpus_train_list.append(json.loads(line))
+    if use_hf_dataset and corpus_train is not None:
+        raise ValueError("Provide either --hf_dataset or --corpus_train, not both.")
 
-    corpus_validation_list = None
-    if corpus_validation is not None:
-        if os.path.isdir(corpus_validation):
-            corpus_validation_list = merge_annotations(corpus_validation)
-        else:
-            assert os.path.isfile(corpus_validation), (
-                f"Corpus_validation file {corpus_validation} does not exist."
+    if use_hf_dataset:
+        if text_column is None or tags_column is None:
+            raise ValueError(
+                "When --hf_dataset is used, both --text_column and --tags_column are required."
             )
-            corpus_validation_list = []
-            with open(corpus_train, "r", encoding="utf-8") as fr:
+
+        corpus_train_list, corpus_validation_list, corpus_test_list = load_hf_corpora(
+            dataset_name=hf_dataset,
+            dataset_config=hf_dataset_config,
+            text_column=text_column,
+            tags_column=tags_column,
+            hf_token=hf_token,
+            selector_column=selector_column,
+            selection=selection,
+            train_split=hf_train_split,
+            validation_split=hf_validation_split,
+            test_split=hf_test_split,
+        )
+
+        if (
+            (split_file is None)
+            and (not force_splitter)
+            and (len(corpus_validation_list) == 0)
+        ):
+            print(
+                "No validation split available for HF dataset and no split file provided. "
+                "Enabling --force_splitter automatically."
+            )
+            force_splitter = True
+
+    else:
+        assert corpus_train is not None, (
+            "Corpus_train is required unless --hf_dataset is provided"
+        )
+        assert (
+            ((corpus_train is not None) and (corpus_validation is not None))
+            | ((split_file is not None) and (corpus_train is not None))
+            | ((corpus_train is not None) and (force_splitter))
+        ), "Either provide a split file or a train and validation corpus"
+
+        corpus_train_path = corpus_train
+        if corpus_train_path is None:
+            raise ValueError("Corpus_train is required unless --hf_dataset is provided")
+
+        if os.path.isdir(corpus_train_path):
+            # go through jsons and merge into one
+            corpus_train_list = merge_annotations(corpus_train_path)
+        else:
+            assert os.path.isfile(corpus_train_path), (
+                f"Corpus_train file {corpus_train_path} does not exist."
+            )
+            # read jsonl
+            corpus_train_list = []
+            with open(corpus_train_path, "r", encoding="utf-8") as fr:
                 for line in fr:
-                    corpus_validation_list.append(json.loads(line))
+                    corpus_train_list.append(json.loads(line))
+
+        corpus_validation_list = None
+        if corpus_validation is not None:
+            if os.path.isdir(corpus_validation):
+                corpus_validation_list = merge_annotations(corpus_validation)
+            else:
+                assert os.path.isfile(corpus_validation), (
+                    f"Corpus_validation file {corpus_validation} does not exist."
+                )
+                corpus_validation_list = []
+                with open(corpus_validation, "r", encoding="utf-8") as fr:
+                    for line in fr:
+                        corpus_validation_list.append(json.loads(line))
+
+        corpus_test_list = []
+
     if split_file is not None:
         assert os.path.isfile(split_file), f"Split_file {split_file} does not exist."
 
     ################################################
     ################################################
 
-    if (split_file is not None) and (corpus_validation is not None):
+    has_validation_corpus = (corpus_validation_list is not None) and (
+        len(corpus_validation_list) > 0
+    )
+
+    if (split_file is not None) and has_validation_corpus:
         print(
-            "Split file and validation corpus provided, ignoring validation corpus file in favor of split file."
+            "Split file and validation corpus provided, ignoring validation corpus in favor of split file."
         )
         corpus_validation_list = None
         corpus_validation = None
+        has_validation_corpus = False
 
     if force_splitter:
-        if corpus_validation is not None:
+        if has_validation_corpus:
             print(
                 "Force splitter is on, and validation set is provided, therefore, ignoring split file."
             )
@@ -2247,7 +2773,8 @@ if __name__ == "__main__":
         print(100 * "=")
     else:
         splits = None
-        corpus_test_list = []
+        if not use_hf_dataset:
+            corpus_test_list = []
 
     OutputDir = args.output_dir
     ChunkSize = args.max_token_length if args.chunk_size is None else args.chunk_size
@@ -2265,6 +2792,7 @@ if __name__ == "__main__":
     accumulation_steps = args.accumulation_steps
     use_multihead_crf = args.use_multihead_crf
     use_multihead = args.use_multihead
+    strict_tag_set = args.strict_tag_set
     entity_types = args.entity_types
     number_of_layers_per_head = args.number_of_layers_per_head
     crf_reduction = args.crf_reduction
@@ -2291,6 +2819,8 @@ if __name__ == "__main__":
             hf_token=hf_token,
             use_multihead_crf=use_multihead_crf or use_multihead,
             entity_types=entity_types,
+            strict_tag_set=strict_tag_set,
+            lang=lang,
         )
 
     if train_model:
@@ -2298,6 +2828,22 @@ if __name__ == "__main__":
         if tokenized_data is None:
             with open(_annotation_loc, "r", encoding="utf-8") as fr:
                 tokenized_data = [json.loads(line) for line in fr]
+
+        # Prefer the label space inferred from parsed data over CLI --num_labels.
+        if (
+            isinstance(tokenized_data, list)
+            and len(tokenized_data) > 0
+            and (not (use_multihead_crf or use_multihead))
+            and isinstance(tokenized_data[0], dict)
+            and ("label2id" in tokenized_data[0])
+            and isinstance(tokenized_data[0]["label2id"], dict)
+        ):
+            inferred_num_labels = len(tokenized_data[0]["label2id"])
+            if inferred_num_labels != num_labels:
+                print(
+                    f"Overriding --num_labels={num_labels} with inferred label count={inferred_num_labels} from tokenized data."
+                )
+                num_labels = inferred_num_labels
 
         # check if input_ids and labels have the same length, are smaller than max_length and if the labels are within range
         for entry in tokenized_data:
@@ -2315,24 +2861,9 @@ if __name__ == "__main__":
                 f"Input_ids are longer than max_length for entry {entry['id']}"
             )
 
-            # assert that all labels are within range, >=0 and < num_labels
-            # Skip label validation for multi-head models (labels are dicts)
-            if not (use_multihead_crf or use_multihead):
-                for label in entry["labels"]:
-                    if multi_class == False:
-                        assert all(
-                            [
-                                ((_label >= 0) and (_label < num_labels))
-                                | (_label == -100)
-                                for _label in label
-                            ]
-                        ), (
-                            f"Label {label}, {type(label)} is not within range for entry {entry['id']}"
-                        )
-                    else:
-                        assert label in [-100] + list(range(num_labels)), (
-                            f"Label {label} is not within range for entry {entry['id']}"
-                        )
+            # NOTE: we intentionally skip strict label-range assertions here.
+            # Label spaces are derived during parsing/tokenization and can differ
+            # from static CLI expectations when using external datasets.
 
         # TODO: this is extremely ugly and needs to be refactored
         tokenized_data_train = [

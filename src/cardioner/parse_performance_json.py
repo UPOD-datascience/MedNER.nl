@@ -20,22 +20,34 @@ def parse_dir(json_dir: str = None) -> Dict[str, List]:
         print(f"Directory {json_dir} does not exist.")
         return res_dict
 
+    def _collect_metrics_from_file(floc: str) -> None:
+        try:
+            with open(floc, "r", encoding="utf-8") as f:
+                d = json.load(f)
+
+            for k, v in d.items():
+                if isinstance(v, dict):
+                    for _k, _v in v.items():
+                        res_dict[f"{k}_{_k}"].append(_v)
+                else:
+                    res_dict[k].append(v)
+        except Exception as e:
+            print(f"Error reading {floc}: {e}")
+
+    found_eval_results = False
     for root, dirs, files in os.walk(json_dir):
         for file in files:
             if file == "eval_results.json":
-                floc = os.path.join(root, file)
-                try:
-                    with open(floc, "r", encoding="utf-8") as f:
-                        d = json.load(f)
+                found_eval_results = True
+                _collect_metrics_from_file(os.path.join(root, file))
 
-                    for k, v in d.items():
-                        if isinstance(v, dict):
-                            for _k, _v in v.items():
-                                res_dict[f"{k}_{_k}"].append(_v)
-                        else:
-                            res_dict[k].append(v)
-                except Exception as e:
-                    print(f"Error reading {floc}: {e}")
+    # Fallback: only if no eval_results.json files were found at all.
+    if not res_dict and not found_eval_results:
+        for root, dirs, files in os.walk(json_dir):
+            for file in files:
+                if file == "all_results.json":
+                    _collect_metrics_from_file(os.path.join(root, file))
+
     return res_dict
 
 

@@ -67,7 +67,7 @@ foreach ($lang in $languages) {
         $corpus_path = Join-Path $base_corpus_path "MultiClinNER-$lang\symptom.json"
         $output_prefix = "SYMPTOM_EuroBERT610_multiclass_${lang}_test_"
 		$splitfile = Join-Path $model_path "split.json"
-		
+
         $msg = "[$(Get-Date)] Starting language: $lang from $corpus_path"
         Write-Host $msg
         Add-Content $logFile $msg
@@ -119,7 +119,7 @@ foreach ($lang in $languages) {
         $corpus_path = Join-Path $base_corpus_path "MultiClinNER-$lang\procedure.json"
         $output_prefix = "PROCEDURE_EuroBERT610_multiclass_${lang}_test_"
 		$splitfile = Join-Path $model_path "split.json"
-		
+
         $msg = "[$(Get-Date)] Starting language: $lang from $corpus_path"
         Write-Host $msg
         Add-Content $logFile $msg
@@ -173,7 +173,7 @@ foreach ($lang in $languages) {
 		$corpus_path = Join-Path $base_corpus_path "MultiClinNER-$lang\disease.json"
         $output_prefix = "DISEASE_DeBERTa_multiclass_${lang}_test"
 		$splitfile = Join-Path $model_path "split.json"
-		
+
         $msg = "[$(Get-Date)] Starting language: $lang from $corpus_path"
         Write-Host $msg
         Add-Content $logFile $msg
@@ -224,7 +224,7 @@ foreach ($lang in $languages) {
         $corpus_path = Join-Path $base_corpus_path "MultiClinNER-$lang\symptom.json"
         $output_prefix = "SYMPTOM_DeBERTa_multiclass_${lang}_test"
 		$splitfile = Join-Path $model_path "split.json"
-		
+
         $msg = "[$(Get-Date)] Starting language: $lang from $corpus_path"
         Write-Host $msg
         Add-Content $logFile $msg
@@ -276,7 +276,7 @@ foreach ($lang in $languages) {
         $corpus_path = Join-Path $base_corpus_path "MultiClinNER-$lang\procedure.json"
         $output_prefix = "PROCEDURE_DeBERTa_multiclass_${lang}_test"
 		$splitfile = Join-Path $model_path "split.json"
-		
+
         $msg = "[$(Get-Date)] Starting language: $lang from $corpus_path"
         Write-Host $msg
         Add-Content $logFile $msg

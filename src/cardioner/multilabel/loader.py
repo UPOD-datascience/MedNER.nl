@@ -236,12 +236,15 @@ def annotate_corpus_paragraph(
         if not tokens:
             continue
 
-        # Hierarchically split tokens into manageable units
-        splits = split_tokens_hierarchical(tokens, max_allowed_chunk_size)
+        # Respect requested chunk_size while staying within model constraints.
+        effective_chunk_size = min(chunk_size, max_allowed_chunk_size)
 
-        # Merge splits back into chunks that fit within max_allowed_chunk_size
+        # Hierarchically split tokens into manageable units
+        splits = split_tokens_hierarchical(tokens, effective_chunk_size)
+
+        # Merge splits back into chunks that fit within effective_chunk_size
         chunks = merge_splits_into_chunks_multilabel(
-            tokens, token_tags, splits, max_allowed_chunk_size
+            tokens, token_tags, splits, effective_chunk_size
         )
 
         # Create annotated data entries for each chunk

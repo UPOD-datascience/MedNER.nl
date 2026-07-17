@@ -69,17 +69,17 @@ run_job() {
 # MedRoBERTa.nl
 ###################
 run_job \
-    "/media/bramiozo/Storage2/DATA/NER/MultiClinAI/NL/MedRoBERTa.nl/DISEASE_multiclass_maxTL128_batch16_chunk128_epochs20_centered_3l_dnn/fold_0" \
+    "/media/bramiozo/Storage2/DATA/NER/MultiClinAI/NL/MedRoBERTa.nl/DISEASE_multiclass_batch16_128cl_20epochs_classweights_3ldnn/fold_0" \
     "disease" \
     "DISEASE_MedRoBERTa_multiclass_"
 
 run_job \
-    "/media/bramiozo/Storage2/DATA/NER/MultiClinAI/NL/MedRoBERTa.nl/SYMPTOM_multiclass_maxTL128_batch16_chunk128_epochs20_centered_3l_dnn/fold_0" \
+    "/media/bramiozo/Storage2/DATA/NER/MultiClinAI/NL/MedRoBERTa.nl/SYMPTOM_multiclass_batch16_128cl_20epochs_classweights_3ldnn/fold_0" \
     "symptom" \
     "SYMPTOM_MedRoBERTa_multiclass_"
 
 run_job \
-    "/media/bramiozo/Storage2/DATA/NER/MultiClinAI/NL/MedRoBERTa.nl/PROCEDURE_multiclass_maxTL128_batch16_chunk128_epochs20_centered_3l_dnn/fold_0" \
+    "/media/bramiozo/Storage2/DATA/NER/MultiClinAI/NL/MedRoBERTa.nl/PROCEDURE_multiclass_batch16_128cl_20epochs_classweights_3ldnn/fold_0" \
     "procedure" \
     "PROCEDURE_MedRoBERTa_multiclass_"
 

@@ -50,6 +50,19 @@ import evaluate
 metric = evaluate.load("seqeval")
 
 
+def _configure_mixed_precision(train_kwargs: Dict[str, object]) -> None:
+    bf16_supported = bool(
+        torch.cuda.is_available()
+        and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+    )
+    train_kwargs["bf16"] = bf16_supported
+    train_kwargs["fp16"] = not bf16_supported
+    print(
+        f"Mixed precision: {'bf16' if bf16_supported else 'fp16'} "
+        f"(cuda_available={torch.cuda.is_available()})"
+    )
+
+
 class WhoAmI(TrainerCallback):
     def on_save(self, args, state, control, **kw):
         print("[DBG] on_save:", kw["model"].__class__.__name__)
@@ -506,7 +519,6 @@ class ModelTrainer:
             "save_total_limit": 1,
             "report_to": "tensorboard",
             "use_cpu": False,
-            "fp16": True,
             "logging_dir": f"{output_dir}/logs",
             "logging_strategy": "steps",
             "logging_steps": 256,
@@ -514,6 +526,7 @@ class ModelTrainer:
             "greater_is_better": True,
             "metric_for_best_model": "f1_macro",
         }
+        _configure_mixed_precision(self.train_kwargs)
 
         if tokenizer is None:
             self.tokenizer = AutoTokenizer.from_pretrained(
