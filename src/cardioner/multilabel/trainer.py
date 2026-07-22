@@ -50,16 +50,36 @@ import evaluate
 metric = evaluate.load("seqeval")
 
 
+def _cuda_device_usable(device: str = "cuda:0") -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        _ = torch.zeros(1, device=device)
+        return True
+    except Exception as e:
+        print(
+            f"CUDA reported available but '{device}' is unusable: {e}. "
+            "Falling back to CPU."
+        )
+        return False
+
+
 def _configure_mixed_precision(train_kwargs: Dict[str, object]) -> None:
-    bf16_supported = bool(
-        torch.cuda.is_available()
-        and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
-    )
+    cuda_usable = _cuda_device_usable("cuda:0")
+    train_kwargs["use_cpu"] = not cuda_usable
+
+    if not cuda_usable:
+        train_kwargs["bf16"] = False
+        train_kwargs["fp16"] = False
+        print("Mixed precision disabled (CPU mode).")
+        return
+
+    bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
     train_kwargs["bf16"] = bf16_supported
     train_kwargs["fp16"] = not bf16_supported
     print(
         f"Mixed precision: {'bf16' if bf16_supported else 'fp16'} "
-        f"(cuda_available={torch.cuda.is_available()})"
+        f"(cuda_available={torch.cuda.is_available()}, cuda_usable={cuda_usable})"
     )
 
 

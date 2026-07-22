@@ -475,6 +475,7 @@ def clean_spans(
     original_text,
     lang: str = "nl",
     trim_trailing_cutoff_words_enabled: bool = False,
+    numeric_only_allowed_tags: Optional[List[str] | set[str]] = None,
 ):
     """
     Apply post-hoc cleaning to entity spans based on predictor_manuela.py logic.
@@ -484,7 +485,8 @@ def clean_spans(
     - Removes trailing closing parenthesis if no opening parenthesis
     - Removes leading whitespace
     - Does not strip language-specific articles
-    - Validates entities (non-empty, not just "de", not numeric, not special chars)
+    - Validates entities (non-empty, not numeric except for configured tags like AGE,
+      not special chars)
 
     Args:
         entities (list): List of entity dictionaries with 'start', 'end', 'text', 'tag', 'score' keys
@@ -492,6 +494,8 @@ def clean_spans(
         lang (str): Language code used for language-specific cleanup rules.
         trim_trailing_cutoff_words_enabled (bool): If True, trim spans at language-specific
             trailing cutoff words (e.g. prepositions/conjunctions). Disabled by default.
+        numeric_only_allowed_tags (Optional[List[str] | set[str]]): Tag names for which
+            numeric-only spans are allowed (e.g. ["AGE"]). Defaults to {"AGE"}.
 
     Returns:
         list: Cleaned entities with updated spans
@@ -537,6 +541,15 @@ def clean_spans(
                     break
 
         return entity_text, start_span, end_span
+
+    if numeric_only_allowed_tags is None:
+        normalized_numeric_only_allowed_tags = {"AGE"}
+    else:
+        normalized_numeric_only_allowed_tags = {
+            str(tag).strip().upper().removeprefix("B-").removeprefix("I-")
+            for tag in numeric_only_allowed_tags
+            if str(tag).strip() != ""
+        }
 
     cleaned_entities = []
 
@@ -646,15 +659,23 @@ def clean_spans(
                 and any(ch.isalpha() for ch in stripped)
             )
 
-        tag_blocks_caps_numeric = entity.get("tag") in {
+        raw_tag = str(entity.get("tag", ""))
+        normalized_tag = raw_tag.upper().removeprefix("B-").removeprefix("I-")
+
+        tag_blocks_caps_numeric = normalized_tag in {
             "PROCEDURE",
             "SYMPTOM",
             "DISEASE",
         }
 
+        numeric_only_disallowed_for_tag = (
+            is_numeric_only(entity_text)
+            and normalized_tag not in normalized_numeric_only_allowed_tags
+        )
+
         if (
             entity_text.strip() != ""
-            and not is_numeric_only(entity_text)
+            and not numeric_only_disallowed_for_tag
             and not is_special_char(entity_text)
             and not (tag_blocks_caps_numeric and is_all_caps_with_numbers(entity_text))
         ):

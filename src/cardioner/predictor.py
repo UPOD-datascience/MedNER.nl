@@ -116,6 +116,7 @@ class PredictionNER:
         device: Optional[str] = None,
         lang: Literal["es", "nl", "en", "it", "ro", "sv", "cz", "multi"] = "nl",
         trim_trailing_cutoff_words: bool = False,
+        allow_numeric_tags: Optional[List[str]] = None,
     ) -> None:
 
         MAX_TOKENS_IOB_SENT = stride
@@ -136,9 +137,17 @@ class PredictionNER:
         else:
             self.device = torch.device(device)
         self.model = self.model.to(self.device)
+        self._normalize_model_dtype_for_inference()
         self.model.eval()
         self.lang = lang
         self.trim_trailing_cutoff_words = trim_trailing_cutoff_words
+        if allow_numeric_tags is None:
+            allow_numeric_tags = ["AGE"]
+        self.allow_numeric_tags = {
+            str(tag).strip().upper().removeprefix("B-").removeprefix("I-")
+            for tag in allow_numeric_tags
+            if str(tag).strip() != ""
+        }
         self.text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
             encoding_name="o200k_base",
             separators=["\n\n\n", "\n\n", "\n", " .", " !", " ?", " ،", " ,", " ", ""],
@@ -151,6 +160,28 @@ class PredictionNER:
         self.base_entity_types = sorted(
             set(label[2:] for label in ner_labels if label != "O")
         )
+
+    def _normalize_model_dtype_for_inference(self) -> None:
+        """
+        Ensure a consistent floating-point dtype for inference.
+
+        Some merged checkpoints are saved in bfloat16, while parts of custom
+        forward passes may produce float32 activations. That combination can lead
+        to runtime matmul dtype mismatches (Float vs BFloat16). Normalizing model
+        weights to float32 avoids those failures in a robust way.
+        """
+        floating_dtypes = {
+            p.dtype for p in self.model.parameters() if p.is_floating_point()
+        }
+        if not floating_dtypes:
+            return
+
+        if floating_dtypes != {torch.float32}:
+            print(
+                "Normalizing model dtype for inference: "
+                f"{sorted(str(d) for d in floating_dtypes)} -> ['torch.float32']"
+            )
+            self.model = self.model.to(dtype=torch.float32)
 
     def _load_model(self, model_checkpoint: str, revision: Optional[str]):
         """
@@ -564,6 +595,7 @@ class PredictionNER:
                 original_text,
                 lang=self.lang,
                 trim_trailing_cutoff_words_enabled=trim_cutoff,
+                numeric_only_allowed_tags=self.allow_numeric_tags,
             )
 
         return entities

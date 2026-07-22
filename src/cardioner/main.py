@@ -8,7 +8,6 @@ nlp = spacy.blank("nl")
 environ["WANDB_MODE"] = "disabled"
 environ["WANDB_DISABLED"] = "true"
 environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import argparse
 import json
@@ -584,6 +583,7 @@ def inference(
     dt4h_post_hoc_cleaning=True,
     dt4h_min_confidence=0.65,
     dt4h_batch_size: int = 4,
+    dt4h_allow_numeric_tags: Optional[List[str]] = None,
 ):
     """
     Run inference on a corpus using a pre-trained model.
@@ -684,6 +684,7 @@ def inference(
             revision=None,
             stride=max_word_per_chunk,
             lang=lang,
+            allow_numeric_tags=dt4h_allow_numeric_tags,
         )
         pred_results = []
         for doc in tqdm(corpus_data, desc="Running inference"):
@@ -2346,6 +2347,13 @@ if __name__ == "__main__":
         help="Batch size for dt4h inference (PredictionNER).",
     )
     argparsers.add_argument(
+        "--allow_numeric_tags",
+        type=str,
+        nargs="*",
+        default=["AGE"],
+        help="Entity tags allowed to be numeric-only in dt4h post-hoc cleaning (default: AGE).",
+    )
+    argparsers.add_argument(
         "--inference_stride",
         type=int,
         default=125,
@@ -2607,6 +2615,7 @@ if __name__ == "__main__":
                 strategy=args.inference_strategy,
                 pipe=args.inference_pipe,
                 dt4h_batch_size=args.inference_batch_size,
+                dt4h_allow_numeric_tags=args.allow_numeric_tags,
             )
 
         print("Inference completed!")
@@ -2936,6 +2945,7 @@ if __name__ == "__main__":
                     lang=lang,
                     max_word_per_chunk=args.inference_stride,  # Auto-detect from tokenizer
                     trust_remote_code=args.trust_remote_code,
+                    dt4h_allow_numeric_tags=args.allow_numeric_tags,
                 )
             else:
                 print("No validation corpus available for test TSV output")
