@@ -49,10 +49,77 @@ import torch
 import transformers
 
 
-def load_state_dict(model_dir: str):
+SUPPORTED_FORCED_MODEL_TYPES = {
+    "bert": (
+        transformers.BertConfig,
+        transformers.BertForTokenClassification,
+        "BertForTokenClassification",
+    ),
+    "roberta": (
+        transformers.RobertaConfig,
+        transformers.RobertaForTokenClassification,
+        "RobertaForTokenClassification",
+    ),
+}
+
+
+def normalize_model_type(model_type: Optional[str]) -> Optional[str]:
+    if model_type is None:
+        return None
+    mt = model_type.strip().lower().replace("_", "-")
+    aliases = {
+        "robert": "roberta",  # common typo
+    }
+    mt = aliases.get(mt, mt)
+    if mt not in SUPPORTED_FORCED_MODEL_TYPES:
+        raise ValueError(
+            f"Unsupported forced model type '{model_type}'. "
+            f"Choose one of: {sorted(SUPPORTED_FORCED_MODEL_TYPES.keys())}"
+        )
+    return mt
+
+
+def load_model_config(model_dir: str, force_model_type: Optional[str] = None):
+    force_model_type = normalize_model_type(force_model_type)
+    if force_model_type is None:
+        return transformers.AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+
+    # Read raw config dict so we can recover from malformed/unknown model_type tags.
+    config_path = os.path.join(model_dir, "config.json")
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(
+            f"Could not find config.json in '{model_dir}' for forced model type loading."
+        )
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg_dict = json.load(f)
+
+    config_cls, _, arch_name = SUPPORTED_FORCED_MODEL_TYPES[force_model_type]
+    cfg_dict["model_type"] = force_model_type
+    cfg_dict["architectures"] = [arch_name]
+    return config_cls.from_dict(cfg_dict)
+
+
+def load_token_cls_model(model_dir: str, force_model_type: Optional[str] = None):
+    force_model_type = normalize_model_type(force_model_type)
+    if force_model_type is None:
+        return transformers.AutoModelForTokenClassification.from_pretrained(
+            model_dir, trust_remote_code=True
+        )
+
+    config = load_model_config(model_dir=model_dir, force_model_type=force_model_type)
+    _, model_cls, _ = SUPPORTED_FORCED_MODEL_TYPES[force_model_type]
+    return model_cls.from_pretrained(
+        model_dir,
+        config=config,
+        trust_remote_code=True,
+    )
+
+
+def load_state_dict(model_dir: str, force_model_type: Optional[str] = None):
     # Load a full model (handles shards, safetensors/bin) then grab its sd.
-    model = transformers.AutoModelForTokenClassification.from_pretrained(
-        model_dir, trust_remote_code=True
+    model = load_token_cls_model(
+        model_dir=model_dir, force_model_type=force_model_type
     )
     sd = model.state_dict()
     del model
@@ -68,6 +135,7 @@ def average_state_dict_advanced(
     ] = None,  # same length as model_dirs (chordal/karcher)
     chain_ts: Optional[List[float]] = None,  # length len(model_dirs)-1 (chain)
     keep_missing: bool = False,  # carry through tensors not shared by all
+    force_model_type: Optional[str] = None,
 ) -> Dict[str, torch.Tensor]:
     """
     Load checkpoints from each directory in `model_dirs`, average them on a per-tensor basis,
@@ -266,7 +334,7 @@ def average_state_dict_advanced(
         path = _check_model_folder(d)
         if not path:
             raise FileNotFoundError(f"No checkpoint file found in: {d}")
-        ckpts.append(load_state_dict(d))
+        ckpts.append(load_state_dict(d, force_model_type=force_model_type))
 
     # ----------------- prepare keys & weights -----------------
     all_keys = set().union(*[set(s.keys()) for s in ckpts])
@@ -351,6 +419,7 @@ def average_state_dicts(
     skip_key_pred=None,
     dtype_str: Literal["float32", "bfloat16"] = "bfloat16",
     mode="arithmetic",
+    force_model_type: Optional[str] = None,
 ):
     assert len(model_dirs) > 1, "Need at least two models to average"
     assert dtype_str in ["float32", "bfloat16"], "dtype must be 'float32' or 'bfloat16'"
@@ -366,7 +435,7 @@ def average_state_dicts(
     dtype = torch.float32 if dtype_str == "float32" else torch.bfloat16
 
     for ix, d in enumerate(model_dirs):
-        sd = load_state_dict(d)
+        sd = load_state_dict(d, force_model_type=force_model_type)
         if template_sd is None:
             template_sd = sd  # keep keys/layout from the first model
         for k, v in sd.items():
@@ -418,10 +487,10 @@ def average_state_dicts(
     return averaged
 
 
-def model_averager(model_locations, mode="arithmetic"):
+def model_averager(model_locations, mode="arithmetic", force_model_type: Optional[str] = None):
     # Load the first model to get initial weights
-    model = transformers.AutoModelForTokenClassification.from_pretrained(
-        model_locations[0], trust_remote_code=True
+    model = load_token_cls_model(
+        model_locations[0], force_model_type=force_model_type
     )
     averaged_weights = {
         name: torch.zeros_like(param) for name, param in model.named_parameters()
@@ -431,8 +500,8 @@ def model_averager(model_locations, mode="arithmetic"):
     # Iterate through each model, accumulate weights
     for location in model_locations:
         print(f"Processing model at {location}")
-        model = transformers.AutoModelForTokenClassification.from_pretrained(
-            location, trust_remote_code=True
+        model = load_token_cls_model(
+            location, force_model_type=force_model_type
         )
         for name, param in model.named_parameters():
             if mode == "arithmetic":
@@ -451,17 +520,15 @@ def model_averager(model_locations, mode="arithmetic"):
             averaged_weights[name] = num_models / averaged_weights[name]
 
     # Load a new model (or reuse the first model) and update weights
-    model_averaged = transformers.AutoModelForTokenClassification.from_pretrained(
-        model_locations[0], trust_remote_code=True
+    model_averaged = load_token_cls_model(
+        model_locations[0], force_model_type=force_model_type
     )
     model_averaged.load_state_dict(averaged_weights, strict=False)
 
     # Handle the heads separately if needed
     head_averaged_weights = {}
     for location in model_locations:
-        model = transformers.AutoModelForTokenClassification.from_pretrained(
-            location, trust_remote_code=True
-        )
+        model = load_token_cls_model(location, force_model_type=force_model_type)
         for name, param in model.classifier.named_parameters():
             print(f"Appending layer: {name}, of shape {param.shape}", flush=True)
             if name not in head_averaged_weights:
@@ -528,15 +595,25 @@ if __name__ == "__main__":
     argparser.add_argument(
         "--dtype", type=str, choices=["float32", "bfloat16"], default="bfloat16"
     )
+    argparser.add_argument(
+        "--force_model_type",
+        type=str,
+        default=None,
+        help=(
+            "Force model family when checkpoint config is wrong/mislabeled. "
+            "Supported: bert, roberta (alias: robert)."
+        ),
+    )
 
     args = argparser.parse_args()
+    args.force_model_type = normalize_model_type(args.force_model_type)
 
     list_of_model_locations = path_parser(args.models_dir)
     print("Models to merge..")
     print(list_of_model_locations)
 
-    model_config = transformers.AutoConfig.from_pretrained(
-        list_of_model_locations[0], trust_remote_code=True
+    model_config = load_model_config(
+        list_of_model_locations[0], force_model_type=args.force_model_type
     )
 
     if args.averaging in ["chordal", "karcher", "chain"]:
@@ -548,14 +625,21 @@ if __name__ == "__main__":
             f"Performing {args.averaging} averaging using method {args.version}...",
             flush=True,
         )
-        new_state_dict = model_averager(list_of_model_locations, mode=args.averaging)
+        new_state_dict = model_averager(
+            list_of_model_locations,
+            mode=args.averaging,
+            force_model_type=args.force_model_type,
+        )
     elif args.version == 2:
         print(
             f"Performing {args.averaging} averaging using method {args.version}...",
             flush=True,
         )
         new_state_dict = average_state_dicts(
-            list_of_model_locations, dtype_str=args.dtype, mode=args.averaging
+            list_of_model_locations,
+            dtype_str=args.dtype,
+            mode=args.averaging,
+            force_model_type=args.force_model_type,
         )
     elif args.version == 3:
         print(
@@ -563,14 +647,20 @@ if __name__ == "__main__":
             flush=True,
         )
         new_state_dict = average_state_dict_advanced(
-            list_of_model_locations, method=args.averaging
+            list_of_model_locations,
+            method=args.averaging,
+            force_model_type=args.force_model_type,
         )
     else:
         raise ValueError("Invalid version: has to be one of [1,2]")
 
-    model_averaged = transformers.AutoModelForTokenClassification.from_config(
-        config=model_config, trust_remote_code=True
-    )
+    if args.force_model_type is None:
+        model_averaged = transformers.AutoModelForTokenClassification.from_config(
+            config=model_config, trust_remote_code=True
+        )
+    else:
+        _, forced_model_cls, _ = SUPPORTED_FORCED_MODEL_TYPES[args.force_model_type]
+        model_averaged = forced_model_cls(model_config)
     missing, unexpected = model_averaged.load_state_dict(new_state_dict, strict=False)
 
     if missing:

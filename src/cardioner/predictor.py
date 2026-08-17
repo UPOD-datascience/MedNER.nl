@@ -318,7 +318,98 @@ class PredictionNER:
 
             yield chunk_text, start_index, end_index
 
-    def predict_text(self, text: str, o_confidence_threshold: float = 0.70):
+    def _per_entity_type_softmax_scores(self, logits, id2label):
+        """Return independent O/B/I softmax probabilities for each entity type."""
+        id2label = {int(label_id): label for label_id, label in id2label.items()}
+        entity_types = sorted(
+            {
+                label[2:]
+                for label in id2label.values()
+                if label.startswith(("B-", "I-"))
+            }
+        )
+        scores = {}
+        o_id = next(
+            (label_id for label_id, label in id2label.items() if label == "O"),
+            None,
+        )
+        if o_id is None:
+            raise ValueError("Forced multilabel decoding requires an 'O' label.")
+
+        for entity_type in entity_types:
+            label_ids = [
+                o_id,
+                next(
+                    label_id
+                    for label_id, label in id2label.items()
+                    if label == f"B-{entity_type}"
+                ),
+                next(
+                    label_id
+                    for label_id, label in id2label.items()
+                    if label == f"I-{entity_type}"
+                ),
+            ]
+            class_probs = F.softmax(logits[..., label_ids], dim=-1)
+            scores[entity_type] = {
+                "O": class_probs[..., 0].item(),
+                "B": class_probs[..., 1].item(),
+                "I": class_probs[..., 2].item(),
+            }
+        return scores
+
+    def _per_entity_type_logit_scores(self, logits, id2label):
+        """Return independent sigmoid scores for each entity type's O/B/I labels."""
+        id2label = {int(label_id): label for label_id, label in id2label.items()}
+        entity_types = sorted(
+            {
+                label[2:]
+                for label in id2label.values()
+                if label.startswith(("B-", "I-"))
+            }
+        )
+        scores = {}
+        for entity_type in entity_types:
+            label_ids = {
+                "O": next(
+                    label_id
+                    for label_id, label in id2label.items()
+                    if label == "O"
+                ),
+                "B": next(
+                    label_id
+                    for label_id, label in id2label.items()
+                    if label == f"B-{entity_type}"
+                ),
+                "I": next(
+                    label_id
+                    for label_id, label in id2label.items()
+                    if label == f"I-{entity_type}"
+                ),
+            }
+            scores[entity_type] = {
+                role: torch.sigmoid(logits[label_id]).item()
+                for role, label_id in label_ids.items()
+            }
+        return scores
+
+    def _per_entity_type_scores(self, logits, id2label, multilabel_strategy):
+        if multilabel_strategy == "proba":
+            return self._per_entity_type_softmax_scores(logits, id2label)
+        if multilabel_strategy == "logit":
+            return self._per_entity_type_logit_scores(logits, id2label)
+        raise ValueError(
+            f"Unknown multilabel strategy '{multilabel_strategy}'. "
+            "Choose 'logit' or 'proba'."
+        )
+
+    def predict_text(
+        self,
+        text: str,
+        o_confidence_threshold: float = 0.70,
+        force_multilabel: bool = False,
+        multilabel_strategy: str = "proba",
+    ):
         # 1. Split text into words and punctuation using regex
         text_matches = split_sentence_with_indices(text)
 
@@ -360,6 +451,20 @@ class PredictionNER:
             tag_id = predictions[i].item()
             tag = id2label[tag_id]
             score = probs[0, i, tag_id].item()
+
+            if force_multilabel:
+                _res = {
+                    "word": word,
+                    "tag": "O",
+                    "start": start,
+                    "end": end,
+                    "score": 0.0,
+                    "multilabel_scores": self._per_entity_type_scores(
+                        logits[0, i], id2label, multilabel_strategy
+                    ),
+                }
+                results.append(_res)
+                continue
 
             # If the tag is "O" and its confidence is low, try to find the next best non-"O" label
             if tag == "O" and score < o_confidence_threshold:
@@ -601,7 +706,11 @@ class PredictionNER:
         return entities
 
     def predict_text_batch(
-        self, texts: List[str], o_confidence_threshold: float = 0.70
+        self,
+        texts: List[str],
+        o_confidence_threshold: float = 0.70,
+        force_multilabel: bool = False,
+        multilabel_strategy: str = "proba",
     ) -> List[List[Dict[str, str]]]:
         batch_text_matches = [split_sentence_with_indices(t) for t in texts]
         batch_text_words = [
@@ -663,6 +772,21 @@ class PredictionNER:
                 tag = id2label[tag_id]
                 score = probs[batch_idx, i, tag_id].item()
 
+                if force_multilabel:
+                    results.append(
+                        {
+                            "word": word,
+                            "tag": "O",
+                            "start": start,
+                            "end": end,
+                            "score": 0.0,
+                            "multilabel_scores": self._per_entity_type_scores(
+                                logits[batch_idx, i], id2label, multilabel_strategy
+                            ),
+                        }
+                    )
+                    continue
+
                 if tag == "O" and score < o_confidence_threshold:
                     sorted_probs = torch.argsort(probs[batch_idx, i], descending=True)
                     for alt_id in sorted_probs:
@@ -691,6 +815,51 @@ class PredictionNER:
             output[valid_idx] = results_per_valid[out_idx]
         return output
 
+    def _aggregate_forced_multilabel(
+        self,
+        tagged_tokens,
+        original_text,
+        confidence_threshold,
+        post_hoc_cleaning,
+        trim_trailing_cutoff_words,
+    ):
+        """Decode each BIO entity type independently so spans may overlap."""
+        entity_types = sorted(
+            {
+                entity_type
+                for token in tagged_tokens
+                for entity_type in token.get("multilabel_scores", {})
+            }
+        )
+        entities = []
+        for entity_type in entity_types:
+            decoded = []
+            for token in tagged_tokens:
+                scores = token["multilabel_scores"][entity_type]
+                b_score = scores["B"]
+                i_score = scores["I"]
+                o_score = scores["O"]
+                if o_score >= b_score and o_score >= i_score:
+                    tag = "O"
+                    score = o_score
+                elif b_score >= i_score:
+                    tag = f"B-{entity_type}"
+                    score = b_score
+                else:
+                    tag = f"I-{entity_type}"
+                    score = i_score
+                decoded.append({**token, "tag": tag, "score": score})
+            entities.extend(
+                self.aggregate_entities(
+                    decoded,
+                    original_text,
+                    confidence_threshold=confidence_threshold,
+                    post_hoc_cleaning=post_hoc_cleaning,
+                    trim_trailing_cutoff_words_enabled=trim_trailing_cutoff_words,
+                )
+            )
+        return entities
+
     def do_prediction_batch(
         self,
         text,
@@ -699,6 +868,8 @@ class PredictionNER:
         post_hoc_cleaning: bool = True,
         o_confidence_threshold: float = 0.7,
         trim_trailing_cutoff_words: Optional[bool] = None,
+        force_multilabel: bool = False,
+        multilabel_strategy: str = "proba",
     ):
         final_prediction = []
         batch_texts = []
@@ -712,15 +883,19 @@ class PredictionNER:
 
             if len(batch_texts) >= batch_size:
                 batch_tokens = self.predict_text_batch(
-                    batch_texts, o_confidence_threshold=o_confidence_threshold
+                    batch_texts,
+                    o_confidence_threshold=o_confidence_threshold,
+                    force_multilabel=force_multilabel,
+                    multilabel_strategy=multilabel_strategy,
                 )
                 for tokens, sub_text, sub_text_start in zip(
                     batch_tokens, batch_texts, batch_offsets
                 ):
-                    predictions = self.aggregate_entities(
-                        tokens,
-                        sub_text,
-                        confidence_threshold=confidence_threshold,
+                    predictions = self._aggregate_forced_multilabel(
+                        tokens, sub_text, confidence_threshold, post_hoc_cleaning,
+                        trim_trailing_cutoff_words
+                    ) if force_multilabel else self.aggregate_entities(
+                        tokens, sub_text, confidence_threshold=confidence_threshold,
                         post_hoc_cleaning=post_hoc_cleaning,
                         trim_trailing_cutoff_words_enabled=trim_trailing_cutoff_words,
                     )
@@ -735,12 +910,18 @@ class PredictionNER:
 
         if batch_texts:
             batch_tokens = self.predict_text_batch(
-                batch_texts, o_confidence_threshold=o_confidence_threshold
+                batch_texts,
+                o_confidence_threshold=o_confidence_threshold,
+                force_multilabel=force_multilabel,
+                multilabel_strategy=multilabel_strategy,
             )
             for tokens, sub_text, sub_text_start in zip(
                 batch_tokens, batch_texts, batch_offsets
             ):
-                predictions = self.aggregate_entities(
+                predictions = self._aggregate_forced_multilabel(
+                    tokens, sub_text, confidence_threshold, post_hoc_cleaning,
+                    trim_trailing_cutoff_words
+                ) if force_multilabel else self.aggregate_entities(
                     tokens,
                     sub_text,
                     confidence_threshold=confidence_threshold,
@@ -761,14 +942,23 @@ class PredictionNER:
         confidence_threshold=0.6,
         post_hoc_cleaning=True,
         trim_trailing_cutoff_words: Optional[bool] = None,
+        force_multilabel: bool = False,
+        multilabel_strategy: str = "proba",
     ):
         final_prediction = []
         # final_prediction_2 = []
         for sub_text, sub_text_start, sub_text_end in self.split_text_with_indices(
             text
         ):
-            tokens = self.predict_text(text=sub_text)
-            predictions = self.aggregate_entities(
+            tokens = self.predict_text(
+                text=sub_text,
+                force_multilabel=force_multilabel,
+                multilabel_strategy=multilabel_strategy,
+            )
+            predictions = self._aggregate_forced_multilabel(
+                tokens, sub_text, confidence_threshold, post_hoc_cleaning,
+                trim_trailing_cutoff_words
+            ) if force_multilabel else self.aggregate_entities(
                 tokens,
                 sub_text,
                 confidence_threshold=confidence_threshold,

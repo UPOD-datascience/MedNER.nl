@@ -24,7 +24,6 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForTokenClassification,
     PreTrainedModel,
-    RobertaForTokenClassification,
     Trainer,
     TrainingArguments,
 )
@@ -260,12 +259,21 @@ class ModelTrainer:
                     "TokenClassificationModelCRF could not be imported. Please ensure modeling.py is available."
                 )
             print("USING CRF:", self.crf)
-            base_model = RobertaForTokenClassification.from_pretrained(
-                model,
-                config=or_config,
-                ignore_mismatched_sizes=True,
-                use_safetensors=True,
-            )
+            try:
+                base_model = AutoModel.from_pretrained(
+                    model,
+                    config=or_config,
+                    add_pooling_layer=False,
+                    trust_remote_code=True,
+                    use_safetensors=True,
+                )
+            except TypeError:
+                base_model = AutoModel.from_pretrained(
+                    model,
+                    config=or_config,
+                    trust_remote_code=True,
+                    use_safetensors=True,
+                )
             self.model = TokenClassificationModelCRF(
                 or_config,
                 base_model,
@@ -313,9 +321,9 @@ class ModelTrainer:
 
         # optionally freeze the backbone
         if freeze_backbone:
-            for p in self.model.roberta.parameters():
+            for p in self.model.backbone.parameters():
                 p.requires_grad = False
-            self.model.roberta.eval()
+            self.model.backbone.eval()
 
         self.device = torch.device(
             "cpu" if self.train_kwargs.get("use_cpu", False) else "cuda:0"

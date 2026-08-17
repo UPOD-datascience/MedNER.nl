@@ -584,6 +584,8 @@ def inference(
     dt4h_min_confidence=0.65,
     dt4h_batch_size: int = 4,
     dt4h_allow_numeric_tags: Optional[List[str]] = None,
+    force_multilabel: bool = False,
+    multilabel_strategy: Literal["logit", "proba"] = "proba",
 ):
     """
     Run inference on a corpus using a pre-trained model.
@@ -608,7 +610,7 @@ def inference(
 
     ref_results = _extract_reference_results(corpus_data)
 
-    if pipe == "hf":
+    if pipe == "hf" and not force_multilabel:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 model_path, trust_remote_code=trust_remote_code, use_fast=True
@@ -701,6 +703,8 @@ def inference(
                 confidence_threshold=dt4h_min_confidence,
                 post_hoc_cleaning=dt4h_post_hoc_cleaning,
                 trim_trailing_cutoff_words=True,
+                force_multilabel=force_multilabel,
+                multilabel_strategy=multilabel_strategy,
             )
             if len(res) > 0:
                 for _res in res:
@@ -2329,6 +2333,18 @@ if __name__ == "__main__":
         help="Trust remote code when loading custom models",
     )
     argparsers.add_argument(
+        "--force_multilabel",
+        action="store_true",
+        default=False,
+        help="Decode multilabel models independently for each BIO entity type, allowing overlapping spans.",
+    )
+    argparsers.add_argument(
+        "--multilabel_strategy",
+        choices=["logit", "proba"],
+        default="proba",
+        help="Forced multilabel decoding strategy: independent sigmoid scores (logit) or per-entity-type O/B/I softmax probabilities (proba).",
+    )
+    argparsers.add_argument(
         "--inference_strategy",
         choices=["simple", "average", "first", "max"],
         default="simple",
@@ -2616,6 +2632,8 @@ if __name__ == "__main__":
                 pipe=args.inference_pipe,
                 dt4h_batch_size=args.inference_batch_size,
                 dt4h_allow_numeric_tags=args.allow_numeric_tags,
+                force_multilabel=args.force_multilabel,
+                multilabel_strategy=args.multilabel_strategy,
             )
 
         print("Inference completed!")
@@ -2946,6 +2964,8 @@ if __name__ == "__main__":
                     max_word_per_chunk=args.inference_stride,  # Auto-detect from tokenizer
                     trust_remote_code=args.trust_remote_code,
                     dt4h_allow_numeric_tags=args.allow_numeric_tags,
+                    force_multilabel=args.force_multilabel,
+                    multilabel_strategy=args.multilabel_strategy,
                 )
             else:
                 print("No validation corpus available for test TSV output")

@@ -206,7 +206,31 @@ class MultiLabelDataCollatorWordLevel:
         return batch
 
 
+def _remap_legacy_roberta_prefix(
+    module,
+    state_dict,
+    prefix,
+    local_metadata,
+    strict,
+    missing_keys,
+    unexpected_keys,
+    error_msgs,
+):
+    """Backward-compat: map legacy `roberta.*` checkpoint keys to `backbone.*`."""
+    old_prefix = f"{prefix}roberta."
+    new_prefix = f"{prefix}backbone."
+
+    legacy_keys = [k for k in list(state_dict.keys()) if k.startswith(old_prefix)]
+    for old_key in legacy_keys:
+        new_key = new_prefix + old_key[len(old_prefix) :]
+        if new_key not in state_dict:
+            state_dict[new_key] = state_dict[old_key]
+        del state_dict[old_key]
+
+
 class MultiLabelTokenClassificationModelHF(PreTrainedModel):
+    base_model_prefix = "backbone"
+
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels
@@ -229,11 +253,15 @@ class MultiLabelTokenClassificationModelHF(PreTrainedModel):
             config, "hidden_dropout_prob", 0.1
         )
 
-        self.roberta = AutoModel.from_pretrained(
+        self.backbone = AutoModel.from_pretrained(
             backbone_name,
             config=backbone_config,
             trust_remote_code=True,
             use_safetensors=True,
+        )
+
+        self._register_load_state_dict_pre_hook(
+            _remap_legacy_roberta_prefix, with_module=True
         )
 
         # Store backbone_model_name in config for future loading
@@ -245,11 +273,11 @@ class MultiLabelTokenClassificationModelHF(PreTrainedModel):
 
         freeze_backbone = getattr(config, "freeze_backbone", False)
         if freeze_backbone:
-            for param in self.roberta.parameters():
+            for param in self.backbone.parameters():
                 param.requires_grad = False
-            self.roberta.eval()
+            self.backbone.eval()
         else:
-            self.roberta.train()
+            self.backbone.train()
 
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, self.num_labels)
@@ -263,11 +291,11 @@ class MultiLabelTokenClassificationModelHF(PreTrainedModel):
         """Override train method to keep frozen backbone in eval mode"""
         super().train(mode)
         if hasattr(self.config, "freeze_backbone") and self.config.freeze_backbone:
-            self.roberta.eval()
+            self.backbone.eval()
         return self
 
     def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        outputs = self.roberta(input_ids, attention_mask=attention_mask, **kwargs)
+        outputs = self.backbone(input_ids, attention_mask=attention_mask, **kwargs)
         sequence_output = outputs.last_hidden_state
         sequence_output = self.dropout(sequence_output)
         logits = self.classifier(sequence_output)
