@@ -353,7 +353,8 @@ def average_state_dict_advanced(
                 raise ValueError("chain_ts must have length len(model_dirs)-1")
             ts = list(map(float, chain_ts))
         else:
-            ts = [1.0 / (i + 1) for i in range(1, n)] # gentle progression
+            #ts = [1.0 / (n - i + 1) for i in range(1, n)]  # gentle progression
+            ts = [1.0 / (i + 1) for i in range(1, n)]
     else:
         if weights is None:
             weights = [1.0 / len(ckpts)] * len(ckpts)
