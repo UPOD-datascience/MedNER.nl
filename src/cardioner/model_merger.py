@@ -41,9 +41,10 @@ import glob
 import json
 import math
 import os
+import shutil
 from collections import defaultdict
 from os import environ
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Set
 
 import torch
 import transformers
@@ -352,7 +353,7 @@ def average_state_dict_advanced(
                 raise ValueError("chain_ts must have length len(model_dirs)-1")
             ts = list(map(float, chain_ts))
         else:
-            ts = [1.0 / (n - i) for i in range(1, n)]  # gentle progression
+            ts = [1.0 / (i + 1) for i in range(1, n)] # gentle progression
     else:
         if weights is None:
             weights = [1.0 / len(ckpts)] * len(ckpts)
@@ -556,6 +557,59 @@ def model_averager(model_locations, mode="arithmetic", force_model_type: Optiona
     return model_averaged.state_dict()
 
 
+def copy_model_metadata_and_code(source_model_dir: str, output_dir: str) -> None:
+    """
+    Preserve source model metadata/code files that `save_pretrained` may rewrite or omit.
+
+    - Restores the original `config.json` from the source model directory.
+    - Copies custom python code files referenced by `auto_map` in config.
+    - Also copies a conventional `modeling.py` if present.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    source_config_path = os.path.join(source_model_dir, "config.json")
+    output_config_path = os.path.join(output_dir, "config.json")
+
+    source_cfg = {}
+    if os.path.isfile(source_config_path):
+        shutil.copy2(source_config_path, output_config_path)
+        try:
+            with open(source_config_path, "r", encoding="utf-8") as f:
+                source_cfg = json.load(f)
+        except Exception as e:
+            print(
+                f"[metadata-copy] Could not parse source config.json from {source_model_dir}: {e}",
+                flush=True,
+            )
+
+    files_to_copy: Set[str] = set()
+
+    # If auto_map exists, copy referenced module files such as "modeling_xxx.py".
+    auto_map = source_cfg.get("auto_map") if isinstance(source_cfg, dict) else None
+    if isinstance(auto_map, dict):
+        for v in auto_map.values():
+            values = v if isinstance(v, list) else [v]
+            for item in values:
+                if not isinstance(item, str):
+                    continue
+                # Typical shapes:
+                # - "module.ClassName"
+                # - "repo-id--module.ClassName"
+                module_spec = item.split("--")[-1]
+                module_name = module_spec.split(".")[0].strip()
+                if module_name:
+                    files_to_copy.add(f"{module_name}.py")
+
+    # Conventional fallback used by many custom HF models.
+    files_to_copy.add("modeling.py")
+
+    for filename in sorted(files_to_copy):
+        src = os.path.join(source_model_dir, filename)
+        dst = os.path.join(output_dir, filename)
+        if os.path.isfile(src):
+            shutil.copy2(src, dst)
+
+
 def path_parser(models_dir):
     """
     Parses a given directory to find all model paths.
@@ -677,3 +731,8 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_dir, exist_ok=True)
     model_averaged.save_pretrained(args.output_dir)
+
+    # Preserve source config/custom code files that can be changed/omitted by save_pretrained.
+    copy_model_metadata_and_code(
+        source_model_dir=list_of_model_locations[0], output_dir=args.output_dir
+    )
