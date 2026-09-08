@@ -30,6 +30,7 @@ from transformers import (
 from transformers.modeling_outputs import TokenClassifierOutput
 from transformers.utils import logging
 
+from cardioner.model_export import export_pruned_modeling_from_auto_map
 from cardioner.utils import pretty_print_classifier
 
 # Import custom model classes
@@ -409,7 +410,7 @@ class ModelTrainer:
         """Custom method to save both the model architecture and state dict properly"""
         save_dir = output_dir or self.output_dir
 
-        # Copy the modeling.py file to output_dir for trust_remote_code compatibility
+        # Export a pruned modeling.py file containing only auto_map-referenced classes
         import os
 
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -419,17 +420,12 @@ class ModelTrainer:
         # Ensure output directory exists
         os.makedirs(save_dir, exist_ok=True)
 
-        if os.path.exists(modeling_src):
-            shutil.copyfile(modeling_src, modeling_dst)
-            print(f"Successfully copied modeling.py to {modeling_dst}")
-
-            # Verify the copy was successful
-            if not os.path.exists(modeling_dst):
-                raise ValueError(f"Failed to copy modeling.py to {modeling_dst}")
-        else:
-            raise ValueError(
-                f"modeling.py not found at {modeling_src}. This file is required for custom models with trust_remote_code=True."
-            )
+        export_pruned_modeling_from_auto_map(
+            source_modeling_path=modeling_src,
+            output_modeling_path=modeling_dst,
+            auto_map=getattr(self.model.config, "auto_map", None),
+        )
+        print(f"Successfully exported pruned modeling.py to {modeling_dst}")
 
         # Set model configuration
         self.model.config.architectures = [self.model.__class__.__name__]
@@ -923,16 +919,17 @@ class MultiHeadCRFTrainer:
         # Ensure output directory exists
         os.makedirs(save_dir, exist_ok=True)
 
-        # Copy modeling.py for trust_remote_code compatibility
+        # Export a pruned modeling.py based on auto_map
         current_dir = os.path.dirname(os.path.abspath(__file__))
         modeling_src = os.path.join(current_dir, "modeling.py")
         modeling_dst = os.path.join(save_dir, "modeling.py")
 
-        if os.path.exists(modeling_src):
-            shutil.copyfile(modeling_src, modeling_dst)
-            print(f"Copied modeling.py to {modeling_dst}")
-        else:
-            raise ValueError(f"modeling.py not found at {modeling_src}")
+        export_pruned_modeling_from_auto_map(
+            source_modeling_path=modeling_src,
+            output_modeling_path=modeling_dst,
+            auto_map=getattr(self.model.config, "auto_map", None),
+        )
+        print(f"Exported pruned modeling.py to {modeling_dst}")
 
         # Save model and tokenizer
         self.model.save_pretrained(save_dir)
@@ -1334,12 +1331,15 @@ class MultiHeadTrainer:
         self.model.save_pretrained(output_dir)
         self.tokenizer.save_pretrained(output_dir)
 
-        # Copy modeling.py for trust_remote_code
+        # Export a pruned modeling.py for trust_remote_code
         modeling_src = os.path.join(os.path.dirname(__file__), "modeling.py")
         modeling_dst = os.path.join(output_dir, "modeling.py")
-        if os.path.exists(modeling_src):
-            shutil.copy(modeling_src, modeling_dst)
-            print(f"Copied modeling.py to {modeling_dst}")
+        export_pruned_modeling_from_auto_map(
+            source_modeling_path=modeling_src,
+            output_modeling_path=modeling_dst,
+            auto_map=getattr(self.model.config, "auto_map", None),
+        )
+        print(f"Exported pruned modeling.py to {modeling_dst}")
 
         print(f"Model saved to {output_dir}")
 

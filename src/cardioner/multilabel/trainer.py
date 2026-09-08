@@ -31,6 +31,7 @@ from transformers.utils import logging
 
 logging.set_verbosity_debug()
 
+from cardioner.model_export import export_pruned_modeling_from_auto_map
 from cardioner.utils import pretty_print_classifier
 
 try:
@@ -900,27 +901,19 @@ class ModelTrainer:
         self.model = self.model.to(dtype=torch.bfloat16)
         try:
             if self.custom_model:
-                # Copy the modeling.py file to output_dir for trust_remote_code compatibility
-
+                # Export a pruned modeling.py containing only auto_map-referenced classes
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 modeling_src = os.path.join(current_dir, "modeling.py")
                 modeling_dst = os.path.join(self.output_dir, "modeling.py")
 
-                if os.path.exists(modeling_src):
-                    # Ensure output directory exists
-                    os.makedirs(self.output_dir, exist_ok=True)
-                    shutil.copyfile(modeling_src, modeling_dst)
-                    print(f"Successfully copied modeling.py to {modeling_dst}")
-
-                    # Verify the copy was successful
-                    if not os.path.exists(modeling_dst):
-                        raise ValueError(
-                            f"Failed to copy modeling.py to {modeling_dst}"
-                        )
-                else:
-                    raise ValueError(
-                        f"modeling.py not found at {modeling_src}. This file is required for custom models with trust_remote_code=True."
-                    )
+                # Ensure output directory exists
+                os.makedirs(self.output_dir, exist_ok=True)
+                export_pruned_modeling_from_auto_map(
+                    source_modeling_path=modeling_src,
+                    output_modeling_path=modeling_dst,
+                    auto_map=getattr(self.model.config, "auto_map", None),
+                )
+                print(f"Successfully exported pruned modeling.py to {modeling_dst}")
 
                 # Add additional metadata to config for loading
                 self.model.config.custom_model_type = (
