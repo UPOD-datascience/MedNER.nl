@@ -50,6 +50,39 @@ import evaluate
 metric = evaluate.load("seqeval")
 
 
+def _cuda_device_usable(device: str = "cuda:0") -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        _ = torch.zeros(1, device=device)
+        return True
+    except Exception as e:
+        print(
+            f"CUDA reported available but '{device}' is unusable: {e}. "
+            "Falling back to CPU."
+        )
+        return False
+
+
+def _configure_mixed_precision(train_kwargs: Dict[str, object]) -> None:
+    cuda_usable = _cuda_device_usable("cuda:0")
+    train_kwargs["use_cpu"] = not cuda_usable
+
+    if not cuda_usable:
+        train_kwargs["bf16"] = False
+        train_kwargs["fp16"] = False
+        print("Mixed precision disabled (CPU mode).")
+        return
+
+    bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+    train_kwargs["bf16"] = bf16_supported
+    train_kwargs["fp16"] = not bf16_supported
+    print(
+        f"Mixed precision: {'bf16' if bf16_supported else 'fp16'} "
+        f"(cuda_available={torch.cuda.is_available()}, cuda_usable={cuda_usable})"
+    )
+
+
 class WhoAmI(TrainerCallback):
     def on_save(self, args, state, control, **kw):
         print("[DBG] on_save:", kw["model"].__class__.__name__)
@@ -173,7 +206,31 @@ class MultiLabelDataCollatorWordLevel:
         return batch
 
 
+def _remap_legacy_roberta_prefix(
+    module,
+    state_dict,
+    prefix,
+    local_metadata,
+    strict,
+    missing_keys,
+    unexpected_keys,
+    error_msgs,
+):
+    """Backward-compat: map legacy `roberta.*` checkpoint keys to `backbone.*`."""
+    old_prefix = f"{prefix}roberta."
+    new_prefix = f"{prefix}backbone."
+
+    legacy_keys = [k for k in list(state_dict.keys()) if k.startswith(old_prefix)]
+    for old_key in legacy_keys:
+        new_key = new_prefix + old_key[len(old_prefix) :]
+        if new_key not in state_dict:
+            state_dict[new_key] = state_dict[old_key]
+        del state_dict[old_key]
+
+
 class MultiLabelTokenClassificationModelHF(PreTrainedModel):
+    base_model_prefix = "backbone"
+
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels
@@ -196,11 +253,15 @@ class MultiLabelTokenClassificationModelHF(PreTrainedModel):
             config, "hidden_dropout_prob", 0.1
         )
 
-        self.roberta = AutoModel.from_pretrained(
+        self.backbone = AutoModel.from_pretrained(
             backbone_name,
             config=backbone_config,
             trust_remote_code=True,
             use_safetensors=True,
+        )
+
+        self._register_load_state_dict_pre_hook(
+            _remap_legacy_roberta_prefix, with_module=True
         )
 
         # Store backbone_model_name in config for future loading
@@ -212,11 +273,11 @@ class MultiLabelTokenClassificationModelHF(PreTrainedModel):
 
         freeze_backbone = getattr(config, "freeze_backbone", False)
         if freeze_backbone:
-            for param in self.roberta.parameters():
+            for param in self.backbone.parameters():
                 param.requires_grad = False
-            self.roberta.eval()
+            self.backbone.eval()
         else:
-            self.roberta.train()
+            self.backbone.train()
 
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, self.num_labels)
@@ -230,11 +291,11 @@ class MultiLabelTokenClassificationModelHF(PreTrainedModel):
         """Override train method to keep frozen backbone in eval mode"""
         super().train(mode)
         if hasattr(self.config, "freeze_backbone") and self.config.freeze_backbone:
-            self.roberta.eval()
+            self.backbone.eval()
         return self
 
     def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        outputs = self.roberta(input_ids, attention_mask=attention_mask, **kwargs)
+        outputs = self.backbone(input_ids, attention_mask=attention_mask, **kwargs)
         sequence_output = outputs.last_hidden_state
         sequence_output = self.dropout(sequence_output)
         logits = self.classifier(sequence_output)
@@ -506,7 +567,6 @@ class ModelTrainer:
             "save_total_limit": 1,
             "report_to": "tensorboard",
             "use_cpu": False,
-            "fp16": True,
             "logging_dir": f"{output_dir}/logs",
             "logging_strategy": "steps",
             "logging_steps": 256,
@@ -514,6 +574,7 @@ class ModelTrainer:
             "greater_is_better": True,
             "metric_for_best_model": "f1_macro",
         }
+        _configure_mixed_precision(self.train_kwargs)
 
         if tokenizer is None:
             self.tokenizer = AutoTokenizer.from_pretrained(

@@ -197,6 +197,50 @@ python main.py \
     --output_dir ./output
 ```
 
+**Hugging Face dataset input (works for both multilabel and multiclass)**
+
+When using `--hf_dataset`, these are required:
+- `--text_column`
+- `--tags_column`
+
+Optional:
+- `--selector_column`
+- `--selection` (required if `--selector_column` is set)
+- `--strict_tag_set` (fail if validation/test contain tags not seen in train)
+
+By default, tags that occur only in validation/test are ignored (mapped to train tag space / `O`).
+
+Example (multilabel):
+```bash
+poetry run python -m cardioner.main \
+    --lang multi \
+    --hf_dataset ai4privacy/pii-masking-openpii-1.5m \
+    --text_column source_text \
+    --tags_column privacy_mask \
+    --selector_column language \
+    --selection en fr de es it da sv nl pt \
+    --parse_annotations \
+    --train_model \
+    --force_splitter \
+    --output_dir output/hf_ai4privacy_multilabel
+```
+
+Example (multiclass):
+```bash
+poetry run python -m cardioner.main \
+    --lang multi \
+    --hf_dataset ai4privacy/pii-masking-openpii-1.5m \
+    --text_column source_text \
+    --tags_column privacy_mask \
+    --selector_column language \
+    --selection en fr de es it da sv nl pt \
+    --parse_annotations \
+    --train_model \
+    --force_splitter \
+    --multiclass \
+    --output_dir output/hf_ai4privacy_multiclass
+```
+
 **Multiclass** (*assumes no over span overlap!*)
 ```
 python main.py \

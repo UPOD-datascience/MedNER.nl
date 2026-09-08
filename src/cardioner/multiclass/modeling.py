@@ -64,6 +64,28 @@ def _build_backbone_from_config(config):
     return backbone, backbone_name
 
 
+def _remap_legacy_roberta_prefix(
+    module,
+    state_dict,
+    prefix,
+    local_metadata,
+    strict,
+    missing_keys,
+    unexpected_keys,
+    error_msgs,
+):
+    """Backward-compat: map legacy `roberta.*` checkpoint keys to `backbone.*`."""
+    old_prefix = f"{prefix}roberta."
+    new_prefix = f"{prefix}backbone."
+
+    legacy_keys = [k for k in list(state_dict.keys()) if k.startswith(old_prefix)]
+    for old_key in legacy_keys:
+        new_key = new_prefix + old_key[len(old_prefix) :]
+        if new_key not in state_dict:
+            state_dict[new_key] = state_dict[old_key]
+        del state_dict[old_key]
+
+
 class MultiHeadCRFConfig(PretrainedConfig):
     """
     Configuration class for Multi-Head CRF models.
@@ -311,6 +333,8 @@ class TokenClassificationModelCRF(PreTrainedModel):
     Custom token classification model with CRF layer and configurable classifier head.
     """
 
+    base_model_prefix = "backbone"
+
     def __init__(
         self,
         config,
@@ -324,21 +348,24 @@ class TokenClassificationModelCRF(PreTrainedModel):
         self.num_labels = config.num_labels
 
         if base_model is None:
-            self.roberta, backbone_name = _build_backbone_from_config(config)
+            self.backbone, backbone_name = _build_backbone_from_config(config)
         else:
-            if hasattr(base_model, "roberta"):
-                self.roberta = base_model.roberta
+            if hasattr(base_model, "backbone"):
+                self.backbone = base_model.backbone
+            elif hasattr(base_model, "roberta"):
+                self.backbone = base_model.roberta
             else:
-                self.roberta = base_model
+                self.backbone = base_model
             backbone_name = (
-                getattr(getattr(self.roberta, "config", None), "_name_or_path", None)
+                getattr(getattr(self.backbone, "config", None), "_name_or_path", None)
                 or getattr(config, "backbone_model_name", None)
                 or getattr(config, "_name_or_path", None)
             )
             if getattr(config, "backbone_model_name", None) is None:
                 config.backbone_model_name = backbone_name
 
-        self.lm_output_size = self.roberta.config.hidden_size
+        self._register_load_state_dict_pre_hook(_remap_legacy_roberta_prefix)
+        self.lm_output_size = self.backbone.config.hidden_size
 
         self.config.freeze_backbone = freeze_backbone
         self.config.classifier_hidden_layers = classifier_hidden_layers
@@ -346,12 +373,12 @@ class TokenClassificationModelCRF(PreTrainedModel):
 
         if freeze_backbone:
             print("+" * 30, "\n\n", "Freezing backbone...", "+" * 30, "\n\n")
-            for param in self.roberta.parameters():
+            for param in self.backbone.parameters():
                 param.requires_grad = False
-            self.roberta.eval()
+            self.backbone.eval()
         else:
             print("+" * 30, "\n\n", "NOT Freezing backbone...", "+" * 30, "\n\n")
-            self.roberta.train(True)
+            self.backbone.train(True)
 
         self.dropout = nn.Dropout(getattr(config, "hidden_dropout_prob", 0.1))
         self.crf = CRF(self.num_labels, batch_first=True)
@@ -397,7 +424,7 @@ class TokenClassificationModelCRF(PreTrainedModel):
         )
 
         try:
-            outputs = self.roberta(
+            outputs = self.backbone(
                 input_ids,
                 attention_mask=attention_mask,
                 token_type_ids=token_type_ids,
@@ -409,7 +436,7 @@ class TokenClassificationModelCRF(PreTrainedModel):
                 return_dict=return_dict,
             )
         except TypeError:
-            outputs = self.roberta(
+            outputs = self.backbone(
                 input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -452,10 +479,10 @@ class TokenClassificationModelCRF(PreTrainedModel):
         return next(self.parameters()).device
 
     def get_input_embeddings(self):
-        return self.roberta.get_input_embeddings()
+        return self.backbone.get_input_embeddings()
 
     def set_input_embeddings(self, value):
-        self.roberta.set_input_embeddings(value)
+        self.backbone.set_input_embeddings(value)
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
@@ -495,7 +522,7 @@ class TokenClassificationModelMultiHeadCRF(PreTrainedModel):
     """
 
     config_class = MultiHeadCRFConfig
-    base_model_prefix = "roberta"
+    base_model_prefix = "backbone"
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
 
     def __init__(self, config, base_model=None, freeze_backbone=None):
@@ -518,21 +545,24 @@ class TokenClassificationModelMultiHeadCRF(PreTrainedModel):
         classifier_dropout = getattr(config, "classifier_dropout", 0.1)
 
         if base_model is None:
-            self.roberta, backbone_name = _build_backbone_from_config(config)
+            self.backbone, backbone_name = _build_backbone_from_config(config)
         else:
-            if hasattr(base_model, "roberta"):
-                self.roberta = base_model.roberta
+            if hasattr(base_model, "backbone"):
+                self.backbone = base_model.backbone
+            elif hasattr(base_model, "roberta"):
+                self.backbone = base_model.roberta
             else:
-                self.roberta = base_model
+                self.backbone = base_model
             backbone_name = (
-                getattr(getattr(self.roberta, "config", None), "_name_or_path", None)
+                getattr(getattr(self.backbone, "config", None), "_name_or_path", None)
                 or getattr(config, "backbone_model_name", None)
                 or getattr(config, "_name_or_path", None)
             )
             if getattr(config, "backbone_model_name", None) is None:
                 config.backbone_model_name = backbone_name
 
-        self.hidden_size = self.roberta.config.hidden_size
+        self._register_load_state_dict_pre_hook(_remap_legacy_roberta_prefix)
+        self.hidden_size = self.backbone.config.hidden_size
         self.dropout = nn.Dropout(getattr(config, "hidden_dropout_prob", 0.1))
 
         print(f"Creating Multi-Head CRF with entity types: {sorted(self.entity_types)}")
@@ -572,12 +602,12 @@ class TokenClassificationModelMultiHeadCRF(PreTrainedModel):
     def _freeze_backbone(self):
         print("+" * 30, "\n\n", "Freezing backbone...", "+" * 30, "\n\n")
 
-        for param in self.roberta.embeddings.parameters():
+        for param in self.backbone.embeddings.parameters():
             param.requires_grad = False
 
         if self.num_frozen_encoders > 0:
             for _, param in islice(
-                self.roberta.encoder.named_parameters(),
+                self.backbone.encoder.named_parameters(),
                 self.num_frozen_encoders * NUM_PER_LAYER,
             ):
                 param.requires_grad = False
@@ -609,7 +639,7 @@ class TokenClassificationModelMultiHeadCRF(PreTrainedModel):
         )
 
         try:
-            outputs = self.roberta(
+            outputs = self.backbone(
                 input_ids,
                 attention_mask=attention_mask,
                 token_type_ids=token_type_ids,
@@ -621,7 +651,7 @@ class TokenClassificationModelMultiHeadCRF(PreTrainedModel):
                 return_dict=return_dict,
             )
         except TypeError:
-            outputs = self.roberta(
+            outputs = self.backbone(
                 input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -693,10 +723,10 @@ class TokenClassificationModelMultiHeadCRF(PreTrainedModel):
         return [predictions[ent] for ent in sorted(self.entity_types)]
 
     def get_input_embeddings(self):
-        return self.roberta.get_input_embeddings()
+        return self.backbone.get_input_embeddings()
 
     def set_input_embeddings(self, value):
-        self.roberta.set_input_embeddings(value)
+        self.backbone.set_input_embeddings(value)
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
@@ -818,7 +848,7 @@ class TokenClassificationModelMultiHead(PreTrainedModel):
     """
 
     config_class = MultiHeadConfig
-    base_model_prefix = "roberta"
+    base_model_prefix = "backbone"
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
 
     def __init__(self, config, base_model=None, freeze_backbone=None):
@@ -843,21 +873,24 @@ class TokenClassificationModelMultiHead(PreTrainedModel):
         self.class_weights = getattr(config, "class_weights", None)
 
         if base_model is None:
-            self.roberta, backbone_name = _build_backbone_from_config(config)
+            self.backbone, backbone_name = _build_backbone_from_config(config)
         else:
-            if hasattr(base_model, "roberta"):
-                self.roberta = base_model.roberta
+            if hasattr(base_model, "backbone"):
+                self.backbone = base_model.backbone
+            elif hasattr(base_model, "roberta"):
+                self.backbone = base_model.roberta
             else:
-                self.roberta = base_model
+                self.backbone = base_model
             backbone_name = (
-                getattr(getattr(self.roberta, "config", None), "_name_or_path", None)
+                getattr(getattr(self.backbone, "config", None), "_name_or_path", None)
                 or getattr(config, "backbone_model_name", None)
                 or getattr(config, "_name_or_path", None)
             )
             if getattr(config, "backbone_model_name", None) is None:
                 config.backbone_model_name = backbone_name
 
-        self.hidden_size = self.roberta.config.hidden_size
+        self._register_load_state_dict_pre_hook(_remap_legacy_roberta_prefix)
+        self.hidden_size = self.backbone.config.hidden_size
         self.dropout = nn.Dropout(getattr(config, "hidden_dropout_prob", 0.1))
 
         print(
@@ -910,12 +943,12 @@ class TokenClassificationModelMultiHead(PreTrainedModel):
     def _freeze_backbone(self):
         print("+" * 30, "\n\n", "Freezing backbone...", "+" * 30, "\n\n")
 
-        for param in self.roberta.embeddings.parameters():
+        for param in self.backbone.embeddings.parameters():
             param.requires_grad = False
 
         if self.num_frozen_encoders > 0:
             for _, param in islice(
-                self.roberta.encoder.named_parameters(),
+                self.backbone.encoder.named_parameters(),
                 self.num_frozen_encoders * NUM_PER_LAYER,
             ):
                 param.requires_grad = False
@@ -945,7 +978,7 @@ class TokenClassificationModelMultiHead(PreTrainedModel):
         )
 
         try:
-            outputs = self.roberta(
+            outputs = self.backbone(
                 input_ids,
                 attention_mask=attention_mask,
                 token_type_ids=token_type_ids,
@@ -957,7 +990,7 @@ class TokenClassificationModelMultiHead(PreTrainedModel):
                 return_dict=return_dict,
             )
         except TypeError:
-            outputs = self.roberta(
+            outputs = self.backbone(
                 input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -1013,10 +1046,10 @@ class TokenClassificationModelMultiHead(PreTrainedModel):
         return [predictions[ent] for ent in sorted(self.entity_types)]
 
     def get_input_embeddings(self):
-        return self.roberta.get_input_embeddings()
+        return self.backbone.get_input_embeddings()
 
     def set_input_embeddings(self, value):
-        self.roberta.set_input_embeddings(value)
+        self.backbone.set_input_embeddings(value)
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
@@ -1113,14 +1146,16 @@ class TokenClassificationModel(PreTrainedModel):
         self.num_labels = config.num_labels
 
         if base_model is None:
-            self.roberta, backbone_name = _build_backbone_from_config(config)
+            self.backbone, backbone_name = _build_backbone_from_config(config)
         else:
-            if hasattr(base_model, "roberta"):
-                self.roberta = base_model.roberta
+            if hasattr(base_model, "backbone"):
+                self.backbone = base_model.backbone
+            elif hasattr(base_model, "roberta"):
+                self.backbone = base_model.roberta
             else:
-                self.roberta = base_model
+                self.backbone = base_model
             backbone_name = (
-                getattr(getattr(self.roberta, "config", None), "_name_or_path", None)
+                getattr(getattr(self.backbone, "config", None), "_name_or_path", None)
                 or getattr(config, "backbone_model_name", None)
                 or getattr(config, "_name_or_path", None)
             )
@@ -1128,13 +1163,14 @@ class TokenClassificationModel(PreTrainedModel):
         if getattr(config, "backbone_model_name", None) is None:
             config.backbone_model_name = backbone_name
 
+        self._register_load_state_dict_pre_hook(_remap_legacy_roberta_prefix)
         self.dropout = nn.Dropout(getattr(config, "hidden_dropout_prob", 0.1))
 
         classifier_hidden_layers = getattr(config, "classifier_hidden_layers", None)
         classifier_dropout = getattr(config, "classifier_dropout", 0.1)
 
         if classifier_hidden_layers is not None:
-            in_size = self.roberta.config.hidden_size
+            in_size = self.backbone.config.hidden_size
             layers = []
             if classifier_hidden_layers:
                 for h in classifier_hidden_layers:
@@ -1148,7 +1184,7 @@ class TokenClassificationModel(PreTrainedModel):
             self.classifier = nn.Sequential(*layers)
         else:
             self.classifier = nn.Linear(
-                self.roberta.config.hidden_size, config.num_labels
+                self.backbone.config.hidden_size, config.num_labels
             )
 
         if isinstance(self.classifier, nn.Sequential):
@@ -1179,7 +1215,7 @@ class TokenClassificationModel(PreTrainedModel):
         )
 
         try:
-            outputs = self.roberta(
+            outputs = self.backbone(
                 input_ids,
                 attention_mask=attention_mask,
                 token_type_ids=token_type_ids,
@@ -1191,7 +1227,7 @@ class TokenClassificationModel(PreTrainedModel):
                 return_dict=return_dict,
             )
         except TypeError:
-            outputs = self.roberta(
+            outputs = self.backbone(
                 input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -1228,10 +1264,10 @@ class TokenClassificationModel(PreTrainedModel):
         )
 
     def get_input_embeddings(self):
-        return self.roberta.get_input_embeddings()
+        return self.backbone.get_input_embeddings()
 
     def set_input_embeddings(self, value):
-        self.roberta.set_input_embeddings(value)
+        self.backbone.set_input_embeddings(value)
 
 
 def load_custom_cardioner_multiclass_model(model_path: str, device: str = "auto"):

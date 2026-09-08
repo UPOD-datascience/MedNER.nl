@@ -41,18 +41,86 @@ import glob
 import json
 import math
 import os
+import shutil
 from collections import defaultdict
 from os import environ
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Set
 
 import torch
 import transformers
 
 
-def load_state_dict(model_dir: str):
+SUPPORTED_FORCED_MODEL_TYPES = {
+    "bert": (
+        transformers.BertConfig,
+        transformers.BertForTokenClassification,
+        "BertForTokenClassification",
+    ),
+    "roberta": (
+        transformers.RobertaConfig,
+        transformers.RobertaForTokenClassification,
+        "RobertaForTokenClassification",
+    ),
+}
+
+
+def normalize_model_type(model_type: Optional[str]) -> Optional[str]:
+    if model_type is None:
+        return None
+    mt = model_type.strip().lower().replace("_", "-")
+    aliases = {
+        "robert": "roberta",  # common typo
+    }
+    mt = aliases.get(mt, mt)
+    if mt not in SUPPORTED_FORCED_MODEL_TYPES:
+        raise ValueError(
+            f"Unsupported forced model type '{model_type}'. "
+            f"Choose one of: {sorted(SUPPORTED_FORCED_MODEL_TYPES.keys())}"
+        )
+    return mt
+
+
+def load_model_config(model_dir: str, force_model_type: Optional[str] = None):
+    force_model_type = normalize_model_type(force_model_type)
+    if force_model_type is None:
+        return transformers.AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+
+    # Read raw config dict so we can recover from malformed/unknown model_type tags.
+    config_path = os.path.join(model_dir, "config.json")
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(
+            f"Could not find config.json in '{model_dir}' for forced model type loading."
+        )
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg_dict = json.load(f)
+
+    config_cls, _, arch_name = SUPPORTED_FORCED_MODEL_TYPES[force_model_type]
+    cfg_dict["model_type"] = force_model_type
+    cfg_dict["architectures"] = [arch_name]
+    return config_cls.from_dict(cfg_dict)
+
+
+def load_token_cls_model(model_dir: str, force_model_type: Optional[str] = None):
+    force_model_type = normalize_model_type(force_model_type)
+    if force_model_type is None:
+        return transformers.AutoModelForTokenClassification.from_pretrained(
+            model_dir, trust_remote_code=True
+        )
+
+    config = load_model_config(model_dir=model_dir, force_model_type=force_model_type)
+    _, model_cls, _ = SUPPORTED_FORCED_MODEL_TYPES[force_model_type]
+    return model_cls.from_pretrained(
+        model_dir,
+        config=config,
+        trust_remote_code=True,
+    )
+
+
+def load_state_dict(model_dir: str, force_model_type: Optional[str] = None):
     # Load a full model (handles shards, safetensors/bin) then grab its sd.
-    model = transformers.AutoModelForTokenClassification.from_pretrained(
-        model_dir, trust_remote_code=True
+    model = load_token_cls_model(
+        model_dir=model_dir, force_model_type=force_model_type
     )
     sd = model.state_dict()
     del model
@@ -68,6 +136,7 @@ def average_state_dict_advanced(
     ] = None,  # same length as model_dirs (chordal/karcher)
     chain_ts: Optional[List[float]] = None,  # length len(model_dirs)-1 (chain)
     keep_missing: bool = False,  # carry through tensors not shared by all
+    force_model_type: Optional[str] = None,
 ) -> Dict[str, torch.Tensor]:
     """
     Load checkpoints from each directory in `model_dirs`, average them on a per-tensor basis,
@@ -266,7 +335,7 @@ def average_state_dict_advanced(
         path = _check_model_folder(d)
         if not path:
             raise FileNotFoundError(f"No checkpoint file found in: {d}")
-        ckpts.append(load_state_dict(d))
+        ckpts.append(load_state_dict(d, force_model_type=force_model_type))
 
     # ----------------- prepare keys & weights -----------------
     all_keys = set().union(*[set(s.keys()) for s in ckpts])
@@ -284,7 +353,8 @@ def average_state_dict_advanced(
                 raise ValueError("chain_ts must have length len(model_dirs)-1")
             ts = list(map(float, chain_ts))
         else:
-            ts = [1.0 / (n - i) for i in range(1, n)]  # gentle progression
+            #ts = [1.0 / (n - i + 1) for i in range(1, n)]  # gentle progression
+            ts = [1.0 / (i + 1) for i in range(1, n)]
     else:
         if weights is None:
             weights = [1.0 / len(ckpts)] * len(ckpts)
@@ -351,6 +421,7 @@ def average_state_dicts(
     skip_key_pred=None,
     dtype_str: Literal["float32", "bfloat16"] = "bfloat16",
     mode="arithmetic",
+    force_model_type: Optional[str] = None,
 ):
     assert len(model_dirs) > 1, "Need at least two models to average"
     assert dtype_str in ["float32", "bfloat16"], "dtype must be 'float32' or 'bfloat16'"
@@ -366,7 +437,7 @@ def average_state_dicts(
     dtype = torch.float32 if dtype_str == "float32" else torch.bfloat16
 
     for ix, d in enumerate(model_dirs):
-        sd = load_state_dict(d)
+        sd = load_state_dict(d, force_model_type=force_model_type)
         if template_sd is None:
             template_sd = sd  # keep keys/layout from the first model
         for k, v in sd.items():
@@ -418,10 +489,10 @@ def average_state_dicts(
     return averaged
 
 
-def model_averager(model_locations, mode="arithmetic"):
+def model_averager(model_locations, mode="arithmetic", force_model_type: Optional[str] = None):
     # Load the first model to get initial weights
-    model = transformers.AutoModelForTokenClassification.from_pretrained(
-        model_locations[0], trust_remote_code=True
+    model = load_token_cls_model(
+        model_locations[0], force_model_type=force_model_type
     )
     averaged_weights = {
         name: torch.zeros_like(param) for name, param in model.named_parameters()
@@ -431,8 +502,8 @@ def model_averager(model_locations, mode="arithmetic"):
     # Iterate through each model, accumulate weights
     for location in model_locations:
         print(f"Processing model at {location}")
-        model = transformers.AutoModelForTokenClassification.from_pretrained(
-            location, trust_remote_code=True
+        model = load_token_cls_model(
+            location, force_model_type=force_model_type
         )
         for name, param in model.named_parameters():
             if mode == "arithmetic":
@@ -451,17 +522,15 @@ def model_averager(model_locations, mode="arithmetic"):
             averaged_weights[name] = num_models / averaged_weights[name]
 
     # Load a new model (or reuse the first model) and update weights
-    model_averaged = transformers.AutoModelForTokenClassification.from_pretrained(
-        model_locations[0], trust_remote_code=True
+    model_averaged = load_token_cls_model(
+        model_locations[0], force_model_type=force_model_type
     )
     model_averaged.load_state_dict(averaged_weights, strict=False)
 
     # Handle the heads separately if needed
     head_averaged_weights = {}
     for location in model_locations:
-        model = transformers.AutoModelForTokenClassification.from_pretrained(
-            location, trust_remote_code=True
-        )
+        model = load_token_cls_model(location, force_model_type=force_model_type)
         for name, param in model.classifier.named_parameters():
             print(f"Appending layer: {name}, of shape {param.shape}", flush=True)
             if name not in head_averaged_weights:
@@ -487,6 +556,59 @@ def model_averager(model_locations, mode="arithmetic"):
     model_averaged.classifier.load_state_dict(head_averaged_weights, strict=False)
 
     return model_averaged.state_dict()
+
+
+def copy_model_metadata_and_code(source_model_dir: str, output_dir: str) -> None:
+    """
+    Preserve source model metadata/code files that `save_pretrained` may rewrite or omit.
+
+    - Restores the original `config.json` from the source model directory.
+    - Copies custom python code files referenced by `auto_map` in config.
+    - Also copies a conventional `modeling.py` if present.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    source_config_path = os.path.join(source_model_dir, "config.json")
+    output_config_path = os.path.join(output_dir, "config.json")
+
+    source_cfg = {}
+    if os.path.isfile(source_config_path):
+        shutil.copy2(source_config_path, output_config_path)
+        try:
+            with open(source_config_path, "r", encoding="utf-8") as f:
+                source_cfg = json.load(f)
+        except Exception as e:
+            print(
+                f"[metadata-copy] Could not parse source config.json from {source_model_dir}: {e}",
+                flush=True,
+            )
+
+    files_to_copy: Set[str] = set()
+
+    # If auto_map exists, copy referenced module files such as "modeling_xxx.py".
+    auto_map = source_cfg.get("auto_map") if isinstance(source_cfg, dict) else None
+    if isinstance(auto_map, dict):
+        for v in auto_map.values():
+            values = v if isinstance(v, list) else [v]
+            for item in values:
+                if not isinstance(item, str):
+                    continue
+                # Typical shapes:
+                # - "module.ClassName"
+                # - "repo-id--module.ClassName"
+                module_spec = item.split("--")[-1]
+                module_name = module_spec.split(".")[0].strip()
+                if module_name:
+                    files_to_copy.add(f"{module_name}.py")
+
+    # Conventional fallback used by many custom HF models.
+    files_to_copy.add("modeling.py")
+
+    for filename in sorted(files_to_copy):
+        src = os.path.join(source_model_dir, filename)
+        dst = os.path.join(output_dir, filename)
+        if os.path.isfile(src):
+            shutil.copy2(src, dst)
 
 
 def path_parser(models_dir):
@@ -528,15 +650,25 @@ if __name__ == "__main__":
     argparser.add_argument(
         "--dtype", type=str, choices=["float32", "bfloat16"], default="bfloat16"
     )
+    argparser.add_argument(
+        "--force_model_type",
+        type=str,
+        default=None,
+        help=(
+            "Force model family when checkpoint config is wrong/mislabeled. "
+            "Supported: bert, roberta (alias: robert)."
+        ),
+    )
 
     args = argparser.parse_args()
+    args.force_model_type = normalize_model_type(args.force_model_type)
 
     list_of_model_locations = path_parser(args.models_dir)
     print("Models to merge..")
     print(list_of_model_locations)
 
-    model_config = transformers.AutoConfig.from_pretrained(
-        list_of_model_locations[0], trust_remote_code=True
+    model_config = load_model_config(
+        list_of_model_locations[0], force_model_type=args.force_model_type
     )
 
     if args.averaging in ["chordal", "karcher", "chain"]:
@@ -548,14 +680,21 @@ if __name__ == "__main__":
             f"Performing {args.averaging} averaging using method {args.version}...",
             flush=True,
         )
-        new_state_dict = model_averager(list_of_model_locations, mode=args.averaging)
+        new_state_dict = model_averager(
+            list_of_model_locations,
+            mode=args.averaging,
+            force_model_type=args.force_model_type,
+        )
     elif args.version == 2:
         print(
             f"Performing {args.averaging} averaging using method {args.version}...",
             flush=True,
         )
         new_state_dict = average_state_dicts(
-            list_of_model_locations, dtype_str=args.dtype, mode=args.averaging
+            list_of_model_locations,
+            dtype_str=args.dtype,
+            mode=args.averaging,
+            force_model_type=args.force_model_type,
         )
     elif args.version == 3:
         print(
@@ -563,14 +702,20 @@ if __name__ == "__main__":
             flush=True,
         )
         new_state_dict = average_state_dict_advanced(
-            list_of_model_locations, method=args.averaging
+            list_of_model_locations,
+            method=args.averaging,
+            force_model_type=args.force_model_type,
         )
     else:
         raise ValueError("Invalid version: has to be one of [1,2]")
 
-    model_averaged = transformers.AutoModelForTokenClassification.from_config(
-        config=model_config, trust_remote_code=True
-    )
+    if args.force_model_type is None:
+        model_averaged = transformers.AutoModelForTokenClassification.from_config(
+            config=model_config, trust_remote_code=True
+        )
+    else:
+        _, forced_model_cls, _ = SUPPORTED_FORCED_MODEL_TYPES[args.force_model_type]
+        model_averaged = forced_model_cls(model_config)
     missing, unexpected = model_averaged.load_state_dict(new_state_dict, strict=False)
 
     if missing:
@@ -587,3 +732,8 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_dir, exist_ok=True)
     model_averaged.save_pretrained(args.output_dir)
+
+    # Preserve source config/custom code files that can be changed/omitted by save_pretrained.
+    copy_model_metadata_and_code(
+        source_model_dir=list_of_model_locations[0], output_dir=args.output_dir
+    )

@@ -304,6 +304,8 @@ def process_splits(
     trust_remote_code: bool = True,
     strategy: Literal["average", "min", "first", "simple"] = "simple",
     pipe: Literal["dt4h", "hf"] = "hf",
+    force_multilabel: bool = False,
+    multilabel_strategy: Literal["logit", "proba"] = "proba",
 ):
     # This runs and scores inference for each folds test samples
     resultfile_list = []
@@ -325,6 +327,8 @@ def process_splits(
                 trust_remote_code=trust_remote_code,
                 strategy=strategy,
                 pipe=pipe,
+                force_multilabel=force_multilabel,
+                multilabel_strategy=multilabel_strategy,
             )
         elif model_type == "multihead_crf":
             main.inference_multihead_crf(
@@ -369,6 +373,8 @@ def process_splits(
                     trust_remote_code=trust_remote_code,
                     strategy=strategy,
                     pipe=pipe,
+                    force_multilabel=force_multilabel,
+                    multilabel_strategy=multilabel_strategy,
                 )
             elif model_type == "multihead_crf":
                 main.inference_multihead_crf(
@@ -486,7 +492,7 @@ def run_main():
     parser.add_argument(
         "--pipe",
         type=str,
-        default="hf",
+        default="dt4h",
         choices=["dt4h", "hf"],
         help="Pipeline type to use for inference.",
     )
@@ -501,6 +507,18 @@ def run_main():
         action="store_true",
         default=False,
         help="Skip inference on the held-out validation/test set.",
+    )
+    parser.add_argument(
+        "--force_multilabel",
+        action="store_true",
+        default=False,
+        help="Decode multilabel models independently for each BIO entity type, allowing overlapping spans.",
+    )
+    parser.add_argument(
+        "--multilabel_strategy",
+        choices=["logit", "proba"],
+        default="proba",
+        help="Forced multilabel decoding strategy: independent sigmoid scores (logit) or per-entity-type O/B/I softmax probabilities (proba).",
     )
     args = parser.parse_args()
 
@@ -557,6 +575,8 @@ def run_main():
         trust_remote_code=args.trust_remote_code,
         strategy=args.strategy,
         pipe=args.pipe,
+        force_multilabel=args.force_multilabel,
+        multilabel_strategy=args.multilabel_strategy,
     )
 
     return fold_on_fold_aggregated, val_aggregated

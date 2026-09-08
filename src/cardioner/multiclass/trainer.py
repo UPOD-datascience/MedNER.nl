@@ -24,7 +24,6 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForTokenClassification,
     PreTrainedModel,
-    RobertaForTokenClassification,
     Trainer,
     TrainingArguments,
 )
@@ -71,6 +70,39 @@ import evaluate
 from torch import nn
 
 metric = evaluate.load("seqeval")
+
+
+def _cuda_device_usable(device: str = "cuda:0") -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        _ = torch.zeros(1, device=device)
+        return True
+    except Exception as e:
+        print(
+            f"CUDA reported available but '{device}' is unusable: {e}. "
+            "Falling back to CPU."
+        )
+        return False
+
+
+def _configure_mixed_precision(train_kwargs: Dict[str, object]) -> None:
+    cuda_usable = _cuda_device_usable("cuda:0")
+    train_kwargs["use_cpu"] = not cuda_usable
+
+    if not cuda_usable:
+        train_kwargs["bf16"] = False
+        train_kwargs["fp16"] = False
+        print("Mixed precision disabled (CPU mode).")
+        return
+
+    bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+    train_kwargs["bf16"] = bf16_supported
+    train_kwargs["fp16"] = not bf16_supported
+    print(
+        f"Mixed precision: {'bf16' if bf16_supported else 'fp16'} "
+        f"(cuda_available={torch.cuda.is_available()}, cuda_usable={cuda_usable})"
+    )
 
 
 class CustomDataCollatorForTokenClassification(DataCollatorForTokenClassification):
@@ -151,7 +183,6 @@ class ModelTrainer:
             "save_total_limit": 1,
             "report_to": "tensorboard",
             "use_cpu": False,
-            "fp16": True,
             "load_best_model_at_end": True,
             "greater_is_better": True,
             "metric_for_best_model": "overall_f1",
@@ -159,6 +190,7 @@ class ModelTrainer:
             "logging_strategy": "steps",
             "logging_steps": 256,
         }
+        _configure_mixed_precision(self.train_kwargs)
         self.crf = use_crf
 
         if use_crf:
@@ -227,12 +259,21 @@ class ModelTrainer:
                     "TokenClassificationModelCRF could not be imported. Please ensure modeling.py is available."
                 )
             print("USING CRF:", self.crf)
-            base_model = RobertaForTokenClassification.from_pretrained(
-                model,
-                config=or_config,
-                ignore_mismatched_sizes=True,
-                use_safetensors=True,
-            )
+            try:
+                base_model = AutoModel.from_pretrained(
+                    model,
+                    config=or_config,
+                    add_pooling_layer=False,
+                    trust_remote_code=True,
+                    use_safetensors=True,
+                )
+            except TypeError:
+                base_model = AutoModel.from_pretrained(
+                    model,
+                    config=or_config,
+                    trust_remote_code=True,
+                    use_safetensors=True,
+                )
             self.model = TokenClassificationModelCRF(
                 or_config,
                 base_model,
@@ -280,11 +321,13 @@ class ModelTrainer:
 
         # optionally freeze the backbone
         if freeze_backbone:
-            for p in self.model.roberta.parameters():
+            for p in self.model.backbone.parameters():
                 p.requires_grad = False
-            self.model.roberta.eval()
+            self.model.backbone.eval()
 
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(
+            "cpu" if self.train_kwargs.get("use_cpu", False) else "cuda:0"
+        )
 
         print("Model:", type(self.model))
         print("Device:", self.device)
@@ -691,7 +734,6 @@ class MultiHeadCRFTrainer:
             "save_total_limit": 1,
             "report_to": "tensorboard",
             "use_cpu": False,
-            "fp16": True,
             "load_best_model_at_end": True,
             "greater_is_better": True,
             "metric_for_best_model": "macro_f1",
@@ -699,6 +741,7 @@ class MultiHeadCRFTrainer:
             "logging_strategy": "steps",
             "logging_steps": 256,
         }
+        _configure_mixed_precision(self.train_kwargs)
 
         # Load tokenizer
         if tokenizer is None:
@@ -790,7 +833,9 @@ class MultiHeadCRFTrainer:
         }
         self.model.config.architectures = ["TokenClassificationModelMultiHeadCRF"]
 
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(
+            "cpu" if self.train_kwargs.get("use_cpu", False) else "cuda:0"
+        )
 
         print("=" * 50)
         print("Multi-Head CRF Model Configuration:")
@@ -1100,7 +1145,6 @@ class MultiHeadTrainer:
             "save_total_limit": 1,
             "report_to": "tensorboard",
             "use_cpu": False,
-            "fp16": True,
             "load_best_model_at_end": True,
             "greater_is_better": True,
             "metric_for_best_model": "macro_f1",
@@ -1108,6 +1152,7 @@ class MultiHeadTrainer:
             "logging_strategy": "steps",
             "logging_steps": 256,
         }
+        _configure_mixed_precision(self.train_kwargs)
 
         # Load tokenizer
         if tokenizer is None:
@@ -1200,7 +1245,9 @@ class MultiHeadTrainer:
         }
         self.model.config.architectures = ["TokenClassificationModelMultiHead"]
 
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(
+            "cpu" if self.train_kwargs.get("use_cpu", False) else "cuda:0"
+        )
 
         print("=" * 50)
         print("Multi-Head Model Configuration (no CRF):")
